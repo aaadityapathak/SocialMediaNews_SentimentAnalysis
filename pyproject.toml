@@ -1,0 +1,62 @@
+[project]
+name = "comp90024-team-23"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "elasticsearch>=9.3.0",
+    "flask>=3.1.3,<4",
+    "valkey>=6.1.1,<7",
+    "pydantic>=2.13.2",
+    "pydantic-settings>=2.13.1",
+    "pandas>=3.0.2",
+    "flask>=3.1.3",
+    "nltk>=3.9.4",
+    "textblob>=0.20.0",
+    "tqdm>=4.67.3",
+]
+
+[tool.uv]
+exclude-newer = "7 days"
+package = false
+
+[tool.uv.workspace]
+members = [
+    "backend/harvesters",
+    "backend/ml-server",
+    "backend/processing",
+    "backend/analytics",
+    "backend/api",
+    "frontend",
+]
+
+[tool.pytest.ini_options]
+testpaths = [
+    "test"
+]
+pythonpath = [
+    "backend/analytics/src",
+    "backend/api/src"
+]
+
+[tool.ruff]
+line-length = 80
+
+[tool.ruff.format]
+quote-style = "double"
+line-ending = "lf"
+
+[dependency-groups]
+dev = [
+    "fire>=0.7.1",
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.3.0",
+    "python-magnumclient>=4.10.0",
+    "python-openstackclient>=9.0.0",
+]
+census = [
+    "geopandas>=1.0.0",
+    "fire>=0.7.0",
+    "python-dotenv>=1.0.0",
+]

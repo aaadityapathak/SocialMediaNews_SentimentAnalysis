@@ -1,0 +1,55 @@
+{
+  "test-index-1": {
+    "mappings": {
+      "properties": {
+        "number_prop": {
+          "type": "integer"
+        },
+        "kw_prop": {
+          "type": "keyword"
+        },
+        "text_field": {
+          "type": "text"
+        },
+        "time_field": {
+          "type": "date"
+        },
+        "sub_list": {
+          "type": "nested",
+          "properties": {
+            "sub_string": {
+              "type": "keyword"
+            },
+            "sub_string_2": {
+              "type": "keyword"
+            }
+          }
+        }
+      }
+    }
+  },
+  "test-index-2": {
+    "mappings": {
+      "properties": {
+        "number_prop": {
+          "type": "integer"
+        },
+        "not_indexed": {
+          "type": "keyword",
+          "index": false
+        },
+        "sub_document": {
+          "type": "object",
+          "properties": {
+            "sub_number": {
+              "type": "integer"
+            },
+            "sub_kw": {
+              "type": "keyword"
+            }
+          }
+        }
+      }
+    }
+  }
+}

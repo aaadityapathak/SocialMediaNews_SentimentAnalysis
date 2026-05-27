@@ -1,0 +1,15 @@
+replicaCount: 1
+
+image:
+  repository: "dstilesr/t23-ml-server"
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+application:
+  name: ml-server
+  apiKey: "ml-server-key"
+  enableEmbeddings: false
+
+service:
+  port: 80
+  type: ClusterIP

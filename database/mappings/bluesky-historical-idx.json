@@ -1,0 +1,34 @@
+{
+  "bluesky-historical-idx": {
+    "mappings": {
+      "properties": {
+        "did": { "type": "keyword" },
+        "time_us": { "type": "long" },
+        "kind": { "type": "keyword" },
+        "identity": {
+          "properties": {
+            "handle": { "type": "keyword" }
+          }
+        },
+        "commit": {
+          "properties": {
+            "operation": { "type": "keyword" },
+            "collection": { "type": "keyword" },
+            "rkey": { "type": "keyword" },
+            "cid": { "type": "keyword" },
+            "record": {
+              "properties": {
+                "text": { "type": "text" },
+                "createdAt": { "type": "date" }
+              }
+            }
+          }
+        },
+        "matched_strong_keywords": { "type": "keyword" },
+        "matched_medium_keywords": { "type": "keyword" },
+        "matched_weak_keywords": { "type": "keyword" },
+        "matched_topic_keywords": { "type": "keyword" }
+      }
+    }
+  }
+}

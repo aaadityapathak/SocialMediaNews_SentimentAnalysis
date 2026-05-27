@@ -1,0 +1,50 @@
+apiVersion: fission.io/v1
+kind: Function
+metadata:
+  name: trends-api
+spec:
+  InvokeStrategy:
+    ExecutionStrategy:
+      ExecutorType: poolmgr
+      MaxScale: 0
+      MinScale: 0
+      SpecializationTimeout: 120
+      TargetCPUPercent: 0
+    StrategyType: execution
+  concurrency: 3
+  environment:
+    name: python313
+    namespace: ""
+  functionTimeout: 60
+  idletimeout: 120
+  package:
+    functionName: emotions_api.compute_trends
+    packageref:
+      name: api-pkg
+      namespace: ""
+  requestsPerPod: 3
+  resources: {}
+  secrets:
+  - name: elastic-api-credentials
+    namespace: ""
+
+---
+apiVersion: fission.io/v1
+kind: HTTPTrigger
+metadata:
+  name: trends-ssentiment
+spec:
+  functionref:
+    functionweights: null
+    name: trends-api
+    type: name
+  host: ""
+  ingressconfig:
+    annotations: null
+    host: ""
+    path: ""
+    tls: ""
+  keepPrefix: false
+  method: POST
+  prefix: /trends/{trend}/compute
+  relativeurl: /trends/{trend}/compute

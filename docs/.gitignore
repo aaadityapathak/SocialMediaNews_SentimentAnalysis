@@ -1,0 +1,11 @@
+# Latex compilation files
+*.aux
+*.log
+*.out
+*.synctex*
+*.toc
+*.bbl
+*.blg
+
+*.fdb_latexmk
+*.fls

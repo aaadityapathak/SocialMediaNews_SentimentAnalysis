@@ -1,0 +1,42 @@
+{
+  "gdelt-index": {
+    "mappings": {
+      "dynamic": true,
+      "properties": {
+        "GlobalEventID": { "type": "keyword" },
+        "Day": { "type": "date", "format": "yyyyMMdd" },
+        "DateAdded": { "type": "date", "format": "yyyyMMddHHmmss" },
+        "SourceURL": { "type": "keyword", "index": false },
+        
+        "Actor1Name": { "type": "text", "fields": { "keyword": { "type": "keyword" } } },
+        "Actor1CountryCode": { "type": "keyword" },
+        "Actor2Name": { "type": "text", "fields": { "keyword": { "type": "keyword" } } },
+        "Actor2CountryCode": { "type": "keyword" },
+        
+        "EventCode": { "type": "keyword" },
+        "EventRootCode": { "type": "keyword" },
+        "QuadClass": { "type": "integer" },
+        
+        "ActionGeo_Fullname": { "type": "text" },
+        "ActionGeo_CountryCode": { "type": "keyword" },
+        "ActionGeo_Lat": { "type": "float" },
+        "ActionGeo_Long": { "type": "float" },
+        "ActionGeo_Location": { "type": "geo_point" },
+        
+        "GoldsteinScale": { "type": "float" },
+        "NumMentions": { "type": "integer" },
+        "NumSources": { "type": "integer" },
+        "NumArticles": { "type": "integer" },
+        "AvgTone": { "type": "float" },
+        
+        "GKG_THEMES": { "type": "keyword" },
+        "GKG_PERSONS": { "type": "keyword" },
+        "GKG_ORGANIZATIONS": { "type": "keyword" },
+        "GKG_Tone_Score": { "type": "float" },
+        "GKG_Tone_Positive": { "type": "float" },
+        "GKG_Tone_Negative": { "type": "float" },
+        "GKG_Tone_Polarity": { "type": "float" }
+      }
+    }
+  }
+}

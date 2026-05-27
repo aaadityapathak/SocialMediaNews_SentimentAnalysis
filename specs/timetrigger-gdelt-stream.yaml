@@ -1,0 +1,11 @@
+apiVersion: fission.io/v1
+kind: TimeTrigger
+metadata:
+  creationTimestamp: null
+  name: gdelt-15m-timer
+spec:
+  cron: "@every 15m"
+  functionref:
+    functionweights: null
+    name: gdelt-streamer
+    type: name

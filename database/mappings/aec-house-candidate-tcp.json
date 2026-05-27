@@ -1,0 +1,32 @@
+{
+  "aec-house-tcp": {
+    "mappings": {
+      "properties": {
+        "candidate_fullname": {"type": "keyword"},
+        "candidate_id": {"type": "integer"},
+        "candidate_surname": {"type": "keyword"},
+        "candidate_given_name": {"type": "keyword"},
+        "party_name": {"type": "keyword"},
+        "party_abbreviation": {"type": "keyword"},
+        "division": {"type": "keyword"},
+        "ballot_position": {"type": "integer"},
+        "swing": {"type": "float"},
+        "elected": {"type": "boolean"},
+        "previously_elected": {"type": "boolean"},
+        "candidate_result": {"type": "keyword"},
+        "ordinary_votes": {"type": "integer"},
+        "polling_place": {
+          "type": "object",
+          "properties": {
+            "id": {"type": "integer"},
+            "division_id": {"type": "integer"},
+            "division_name": {"type": "keyword"},
+            "state_code": {"type": "keyword"},
+            "post_code": {"type": "keyword"},
+            "location": {"type": "geo_point"}
+          }
+        }
+      }
+    }
+  }
+}

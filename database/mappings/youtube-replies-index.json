@@ -1,0 +1,49 @@
+{
+	"youtube-replies-idx": {
+		"mappings": {
+			"properties": {
+				"reply_id": {
+					"type": "keyword"
+				},
+				"comment_id": {
+					"type": "keyword"
+				},
+				"video_id": {
+					"type": "keyword"
+				},
+				"video_topic": {
+					"type": "keyword"
+				},
+				"video_channel": {
+					"type": "keyword"
+				},
+				"text": {
+					"type": "text"
+				},
+				"author": {
+					"type": "keyword"
+				},
+				"like_count": {
+					"type": "integer"
+				},
+				"published_at": {
+					"type": "date"
+				},
+				"updated_at": {
+					"type": "date"
+				},
+				"sentiment": {
+					"type": "object",
+					"properties": {
+						"label": {
+							"type": "keyword"
+						},
+						"score": {
+							"type": "float"
+						}
+					}
+				}
+			}
+		}
+	}
+}

@@ -1,0 +1,55 @@
+# Python
+**/__pycache__/
+**/.ipynb_checkpoints/
+build/
+dist/
+venv/
+.venv/
+
+# node
+**/node_modules/
+
+# Terraform
+**/.terraform/
+**/*.tfstate*
+**/*.tfvars
+
+# Env - secrets
+**/*.env
+**/*.secret
+
+# IDE
+.idea/
+
+# Kube configs
+**/config
+**/kubeconfig
+
+# Task
+**/.task
+
+# Mac OS
+**/.DS_Store
+
+# Test notebooks
+**/Tests.ipynb
+**/Test.ipynb
+
+# Data
+**/*-data.jsonl
+**/*.zip
+**/data/
+
+# Requirements files - Only used for Fission packaging. We use UV for overall dependency management
+**/*requirements.txt
+
+# Huggingface Models
+**/hf-models/
+
+
+# SUDO data
+*.cst
+*.dbf
+*.prj
+*.shp
+*.shx

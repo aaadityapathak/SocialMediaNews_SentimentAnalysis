@@ -1,0 +1,8 @@
+ML Server deployed in namespace {{ .Release.Namespace }}.
+
+Port-forward (local access):
+  kubectl port-forward --namespace {{ .Release.Namespace }} svc/{{ include "ml-server.fullname" . }} 8004:{{ .Values.service.port }}
+  curl http://localhost:8004/health
+
+Within the cluster:
+  http://{{ include "ml-server.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}

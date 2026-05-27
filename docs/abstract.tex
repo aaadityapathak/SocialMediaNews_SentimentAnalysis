@@ -1,0 +1,16 @@
+\section*{Abstract}
+
+The exponential growth of social media platforms has created an unprecedented volume of publicly accessible data, offering researchers and analysts a real-time window into public sentiment and discourse. However, harvesting and deriving meaningful insight from this data at scale demands both sophisticated infrastructure and carefully designed analytical pipelines. This paper presents the design and implementation of a cloud-native platform built on the Melbourne Research Cloud (MRC), NeCTAR, developed to continuously harvest and analyse Australia-focused social media data across multiple platforms. The system leverages Kubernetes as its core orchestration layer, with infrastructure provisioned declaratively through Terraform to ensure reproducibility. 
+
+
+Data is continuously harvested from Mastodon, BlueSky, YouTube, and the GDELT, a news event dataset, using a serverless architecture built on Fission. After which lightweight harvester functions feed raw records into a Valkey message queue. This queue-driven approach decouples ingestion from processing, allowing the system to absorb spikes in data volume while maintaining throughput. A dedicated machine learning inference service, built on ONNX-optimised transformer models, enriches each record with sentiment scores and semantic text embeddings before it is indexed into ElasticSearch. Several analytical scenarios are explored, all connected to Australia, examining how public sentiment on social media evolves around topics such as political figures, transport, and major current events, and how these compare across platforms and against official census and government data. This paper discusses the architectural trade-offs, scalability properties, and practical challenges encountered when deploying and operating such a system on the NeCTAR Research Cloud, contributing insights into the effective application of cloud infrastructure and big data tooling for real-world social media analytics.
+
+\textit{
+Keywords: ElasticSearch, Fission, Valkey, Processor, Sentiment Analysis, NeCTAR.
+}
+
+\begin{itemize}
+	\item \textbf{Code Repository}: \url{https://gitlab.unimelb.edu.au/mpacompiamac/comp90024_team_23}
+	
+	\item \textbf{Video Demonstration}: \url{https://www.youtube.com/watch?v=_PTk-6_0nWQ}
+\end{itemize}

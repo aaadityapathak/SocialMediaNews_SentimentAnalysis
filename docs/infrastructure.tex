@@ -1,0 +1,58 @@
+
+\section{Infrastructure}
+
+\subsection{Infrastructure Management}
+The overall infrastructure underpinning the platform is managed using Terraform, an open-source Infrastructure as Code (IaC) framework. The syntax is declarative with each block of code defining a resource to be provisioned. Declarative definitions (versus imperative) allow the user to define the desired state, rather than an exhaustive list of all the interim steps required to achieve that state. This approach ensures that the entire infrastructure can be version-controlled and that its reviewed and reproduced consistently across deployments. Instead of manual changes, all infrastructure definitions are expressed as Terraform configuration files.
+\\
+
+To manage the Terraform state files, the team leveraged GitLab’s built-in Terraform state backend to store files remotely on the instance instead of local files on individual machines. This ensures that all members are always working against the same view of the infrastructure, and it also enables state locking, which prevents two members from applying conflicting changes simultaneously \cite{valtanen2023improving}. The backend is configured with both lock and unlock addresses pointing to the GitLab Terraform state API, with a retry wait of five seconds to handle transient locking conflicts with ease.
+\\ 
+
+Day-to-day infrastructure operations are further streamlined using Go-Task, a task runner that wraps common Terraform and deployment commands into named tasks defined in a \texttt{Taskfile.yml} file. This includes tasks for initialising Terraform, declared as ‘task init’, and validating the configuration, using ‘task validate’. A few other notable tasks include ‘task apply’ used for applying changes and ‘task deploy-resource’, which deploys individual resources in isolation
+
+\subsection{Core Infrastructure}
+
+
+\paragraph{Kubernetes Cluster}
+The cornerstone of the whole infrastructure is a Kubernetes cluster deployed on NeCTAR infrastructure using OpenStack's Magnum service for managing Kubernetes. The cluster has one control plane (or master) node and three worker nodes. All our code and backend services run on this cluster.
+
+\paragraph{Storage Class}
+Persistent storage for stateful services is provided through a custom Kubernetes storage called Perfretain. This storage class is backed by OpenStack’s Cinder block storage service and is configured with a retain reclaim policy \cite{malla2020self}. This ensures persistent data like our database files.
+
+\paragraph{ElasticSearch and Kibana}
+ElasticSearch is deployed to the Kubernetes cluster using the Elastic Operator, a Kubernetes-native operator that manage the lifecycle of ElasticSearch clusters as custom resources. The operator itself is deployed via Helm using Terraform's Helm provider. This database is then instantiated from a Kubernetes manifest that is applied by Terraform and handled by the operator. Kibana is similarly deployed using the same operator from a defined manifest. This provides a web-based interface for browsing indices, running queries and monitoring cluster health.
+
+\paragraph{Fission}
+Fission is deployed to the cluster via its official Helm chart, also managed through Terraform’s Helm provider. Fission serves as the Function as a Service (FaaS) framework on which all data harvesting and processing functions run. Two additional services are deployed alongside fission to support the event-driven data pipeline
+\begin{itemize}
+	\item Valkey: It is a Redis-compatible key-value store, used as the message queue that connects harvester functions to the data processing function.
+	\item KEDA: It is deployed to enable queue-length-based autoscaling of fission
+\end{itemize}
+
+
+
+\subsection{Deployment Procedure}
+In order to deploy, you must first supply OpenStack credentials in a \textit{.env} file in the infrastructure repository.There are many dependencies between components of the core infrastructure, so they have to be deployed in stages. This can be done with the Taskfile utility as follows:
+\begin{enumerate}
+	\item Deploy the cluster and download the kubeconfig file: \\
+	\texttt{task deploy-resource TARGET=openstack\_containerinfra\_cluster\_v1.main}\\
+	Then, get the kubeconfig file for  the cluster and put it at \texttt{infrastructure/config}.
+	
+	\item Deploy the Elastic Operator. Deploying this at the same time as the ElasticSearch cluster may cause errors since the operator API version may not be recognised by Kubernetes.\\
+	\texttt{task deploy-resource TARGET=helm\_release.elastic\_operator}
+	
+	\item After this, other resources should not have dependency issues, so you can finish the deployment with a full Terraform apply: \texttt{task apply}.
+\end{enumerate}
+
+
+\subsection{Fission Setup}
+We use Fission as a Function as a Service (FaaS) framework to run and orchestrate functions with minimal infrastructure setup. In order to manage Fission resources such as packages, functions, routes, and triggers, we use Fission specifications. In what follows we will explain our Fission setup and utilities we set up to help run functions.
+
+\subsubsection{Environment}
+The default Fission Python environment uses a very outdated version of Python and of the packages used by Fission. Therefore, in order to use more a more recent Python version, we created a custom Fission environment for Python. Some changes we made to create this custom environment are:
+\begin{itemize}
+	\item Use up-to-date Python version 3.13.
+	
+	\item Use updated versions of the packages used in the Fission environment, such as Flask and Sentry.  We dropped the apparently abandoned "bjoern" package and replaced Redis for Valkey as well.
+\end{itemize}
+The Docker image for this environment was published to DockerHub, where it is made publicly available. In our Fission specifications we create this environment under the name "python313" and use it to run all our functions.

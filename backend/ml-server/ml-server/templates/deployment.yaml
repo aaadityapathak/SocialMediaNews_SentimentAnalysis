@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ml-server.fullname" . }}
+  labels:
+    {{- include "ml-server.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "ml-server.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ml-server.labels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: ml-server
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          env:
+            - name: SERVER_API_KEY
+              value: {{ .Values.application.apiKey | quote }}
+            - name: INFERENCE_EMBEDDINGS_ENABLED
+              value: {{ .Values.application.enableEmbeddings | quote }}
+          ports:
+            - containerPort: 8004
+              name: http
+          readinessProbe:
+            initialDelaySeconds: 90
+            periodSeconds: 30
+            failureThreshold: 4
+            httpGet:
+              port: http
+              path: "/health"
+          livenessProbe:
+            initialDelaySeconds: 90
+            periodSeconds: 5
+            failureThreshold: 2
+            httpGet:
+              port: http
+              path: "/health"

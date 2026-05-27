@@ -1,0 +1,32 @@
+{
+	"youtube-videos-idx": {
+		"mappings": {
+			"properties": {
+				"video_id": {
+					"type": "keyword"
+				},
+				"title": {
+					"type": "text"
+				},
+				"channel": {
+					"type": "keyword"
+				},
+				"channel_id": {
+					"type": "keyword"
+				},
+				"description": {
+					"type": "text"
+				},
+				"published": {
+					"type": "date"
+				},
+				"topic": {
+					"type": "keyword"
+				},
+				"query": {
+					"type": "keyword"
+				}
+			}
+		}
+	}
+}

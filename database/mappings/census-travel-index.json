@@ -1,0 +1,76 @@
+{
+	"census-travel-zones": {
+		"mappings": {
+			"properties": {
+				"zone_code": {
+					"type": "keyword"
+				},
+				"zone_name": {
+					"type": "keyword"
+				},
+				"zone_type": {
+					"type": "keyword"
+				},
+				"state": {
+					"type": "keyword"
+				},
+				"year": {
+					"type": "integer"
+				},
+				"geometry": {
+					"type": "geo_shape"
+				},
+				"dominant_mode": {
+					"type": "keyword"
+				},
+				"travel_modes": {
+          "type": "object",
+					"properties": {
+						"train": {
+							"type": "integer"
+						},
+						"bus": {
+							"type": "integer"
+						},
+						"ferry": {
+							"type": "integer"
+						},
+						"tram": {
+							"type": "integer"
+						},
+						"taxi": {
+							"type": "integer"
+						},
+						"car_driver": {
+							"type": "integer"
+						},
+						"car_passenger": {
+							"type": "integer"
+						},
+						"car": {
+							"type": "integer"
+						},
+						"truck": {
+							"type": "integer"
+						},
+						"motorbike": {
+							"type": "integer"
+						},
+						"bicycle": {
+							"type": "integer"
+						},
+						"walk_only": {
+							"type": "integer"
+						},
+						"other": {
+							"type": "integer"
+						},
+						"total": {
+							"type": "integer"
+						}
+					}
+				}
+			}
+		}
+	}
+}

@@ -1,0 +1,146 @@
+version: 3
+tasks:
+  format:
+    desc: Format the code in the repo
+    cmds:
+      - terraform fmt -recursive infrastructure
+      - uvx ruff format
+
+  init:
+    desc: Run Terraform Init on the infrastructure
+    sources:
+      - "main.tf"
+    dotenv:
+      - ".env"
+    dir: infrastructure
+    env:
+      TF_STATE_NAME: comp90024-infra
+    cmd: |
+      terraform init \
+        -backend-config="address=https://gitlab.unimelb.edu.au/api/v4/projects/6758/terraform/state/$TF_STATE_NAME" \
+        -backend-config="lock_address=https://gitlab.unimelb.edu.au/api/v4/projects/6758/terraform/state/$TF_STATE_NAME/lock" \
+        -backend-config="unlock_address=https://gitlab.unimelb.edu.au/api/v4/projects/6758/terraform/state/$TF_STATE_NAME/lock" \
+        -backend-config="lock_method=POST" \
+        -backend-config="unlock_method=DELETE" \
+        -backend-config="retry_wait_min=5"
+
+  validate:
+    desc: Run Terraform Validate on the Infrastructure
+    deps:
+      - init
+    dir: infrastructure
+    cmd: terraform validate
+
+  apply:
+    desc: Run Terraform apply to deploy the infrastructure
+    deps:
+      - validate
+    dotenv:
+      - .env
+    dir: infrastructure
+    interactive: true
+    cmd: terraform apply {{.CLI_ARGS}}
+
+  get-kubeconfig:
+    desc: Get the Kubeconfig file from the cluster. Should only be run **once** on cluster creation
+    internal: true
+    dir: infrastructure
+    dotenv:
+      - .env
+    cmd: |
+      test -f config \
+        || openstack coe cluster config $(terraform output -raw openstack_containerinfra_cluster_v1.main)
+
+  deploy-resource:
+    desc: Deploy a specific terraform resource from the template
+    dir: infrastructure
+    dotenv:
+      - .env
+    deps:
+      - "validate"
+    requires:
+      vars:
+        - "TARGET"
+    cmd: terraform apply -target={{.TARGET}}
+
+  zip-package:
+    desc: Zip the given package's source code for use with a fission function
+    label: zip-package-{{.PACKAGE | default "harvesters"}}
+    dir: backend/{{.PACKAGE | default "harvesters"}}
+    sources:
+      - "./src/**/*.py"
+      - "./src/requirements.txt"
+      - "./src/*.sh"
+    generates:
+      - "{{.PACKAGE | default \"harvesters\"}}.zip"
+    cmd: |
+      rm -f {{.PACKAGE | default "harvesters"}}.zip \
+        && cd src && zip -r ../{{.PACKAGE | default "harvesters"}}.zip ./ \
+          -x "*/__pycache__/*" \
+          -x "*.pyc" \
+          -x "*/.pytest_cache/*" \
+          -x "*/.ipynb_checkpoints/*"
+
+  create-harvester-spec:
+    desc: Make a fission spec for a harvester function
+    requires:
+      vars:
+        - "ENTRYPOINT"
+        - "NAME"
+        - "PROVIDER_SECRET"
+    cmd: |
+      fission function create --spec \
+          --name {{.NAME}} \
+          --env {{.ENVIRONMENT | default "python313"}} \
+          --pkgname harvesters-pkg \
+          --entrypoint {{.ENTRYPOINT}} \
+          --secret "elastic-api-credentials" \
+          --secret {{.PROVIDER_SECRET}} \
+          --secret "valkey-cfg" \
+          --rpp {{.REQ_PER_POD | default 2}} \
+          --concurrency {{.CONCURRENCY | default 3}}
+
+  export-package-requirements:
+    desc: Export a package's dependencies in a requirements.txt format
+    label: export-package-requirements-{{.PACKAGE | default "harvesters"}}
+    sources:
+      - backend/{{.PACKAGE | default "harvesters" }}/pyproject.toml
+    cmd: |
+      uv export \
+          --package {{.PACKAGE | default "harvesters"}} \
+          --format requirements.txt  \
+          --no-hashes \
+          --no-annotate \
+          > {{.TARGET | default "requirements.txt"}}
+
+  deploy-fission-specs:
+    desc: Apply Fission specs to deploy serverless resources
+    cmds:
+      - task: export-package-requirements
+        vars:
+          PACKAGE: harvesters
+          TARGET: "backend/harvesters/src/requirements.txt"
+
+      - task: export-package-requirements
+        vars:
+          PACKAGE: processing
+          TARGET: "backend/processing/src/requirements.txt"
+
+      - task: export-package-requirements
+        vars:
+          PACKAGE: api
+          TARGET: "backend/api/src/requirements.txt"
+
+      - task: zip-package
+        vars:
+          PACKAGE: harvesters
+
+      - task: zip-package
+        vars:
+          PACKAGE: processing
+
+      - task: zip-package
+        vars:
+          PACKAGE: api
+
+      - fission specs apply --wait

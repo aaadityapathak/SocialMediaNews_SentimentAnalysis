@@ -1,0 +1,52 @@
+{
+  "social-posts-index": {
+    "mappings": {
+      "properties": {
+        "platform": {
+          "type": "keyword"
+        },
+        "record_type": {
+          "type": "keyword"
+        },
+        "platform_post_id": {
+          "type": "keyword"
+        },
+        "common_id": {
+          "type": "keyword"
+        },
+        "text": {
+          "type": "text"
+        },
+        "created_at": {
+          "type": "date"
+        },
+        "ingested_at": {
+          "type": "date"
+        },
+        "source_url": {
+          "type": "keyword"
+        },
+        "source_meta": {
+          "type": "object",
+          "enabled": false
+        },
+        "sentiment": {
+          "type": "object",
+          "properties": {
+            "positive": {"type":  "float"},
+            "neutral": {"type":  "float"},
+            "negative": {"type":  "float"},
+            "sentiment": {"type":  "keyword"}
+          }
+        },
+        "emotion": {
+          "type": "nested",
+          "properties": {
+            "label": {"type": "keyword"},
+            "score": {"type": "float", "index": false}
+          }
+        }
+      }
+    }
+  }
+}

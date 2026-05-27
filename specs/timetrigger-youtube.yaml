@@ -1,0 +1,10 @@
+apiVersion: fission.io/v1
+kind: TimeTrigger
+metadata:
+  name: youtube-harvest
+spec:
+  cron: '@every 12h'
+  functionref:
+    functionweights: null
+    name: youtube-harvest
+    type: name

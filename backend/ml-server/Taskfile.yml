@@ -1,0 +1,51 @@
+version: '3'
+
+vars:
+  MODELS_DIR: '{{.TASKFILE_DIR}}/hf-models'
+  EMBEDDING_ONNX: 'model_qint8_avx512_vnni.onnx'
+
+tasks:
+  download-embeddings:
+    desc: Fetch sentence-transformers/all-mpnet-base-v2 with quantized ONNX variant
+    dir: '{{.TASKFILE_DIR}}'
+    cmds:
+      - uv run python scripts/download_embeddings.py
+    status:
+      - test -f {{.MODELS_DIR}}/embeddings/onnx/{{.EMBEDDING_ONNX}}
+
+  export-sentiment:
+    desc: Download sentiment model from HF Hub and export to quantized ONNX
+    dir: '{{.TASKFILE_DIR}}'
+    cmds:
+      - uv run --group dev python scripts/export_sentiment.py
+    status:
+      - test -f {{.MODELS_DIR}}/sentiment/model.onnx
+
+  export-emotion:
+    desc: Download emotion detection model from HF Hub and export to quantized ONNX
+    dir: '{{.TASKFILE_DIR}}'
+    cmds:
+      - uv run --group dev python scripts/export_emotion.py
+    status:
+      - test -f {{.MODELS_DIR}}/emotion/model.onnx
+
+  prepare-models:
+    desc: Prepare all ONNX models in hf-models/ (run before docker build)
+    deps:
+      - download-embeddings
+      - export-sentiment
+
+  clean-models:
+    desc: Remove all downloaded/exported models
+    cmds:
+      - rm -rf {{.MODELS_DIR}}
+
+  build-image:
+    desc: Build Docker image with models baked in (runs prepare-models first)
+    deps:
+      - prepare-models
+    dir: '{{.TASKFILE_DIR}}/../..'
+    cmds:
+      - |
+        docker build -f backend/ml-server/Dockerfile \
+                     -t {{.IMAGE_NAME | default "ml-server"}}:{{.IMAGE_TAG | default "latest"}} .

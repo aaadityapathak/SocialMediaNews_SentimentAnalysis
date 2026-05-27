@@ -1,0 +1,10 @@
+apiVersion: fission.io/v1
+kind: TimeTrigger
+metadata:
+  name: bluesky-stream
+spec:
+  cron: '@every 30s'
+  functionref:
+    functionweights: null
+    name: bluesky-stream
+    type: name

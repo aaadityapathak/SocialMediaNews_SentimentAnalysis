@@ -1,0 +1,87 @@
+{
+  "mastodon-idx": {
+    "mappings": {
+      "properties": {
+        "id": {
+          "type": "keyword",
+          "index": false
+        },
+        "visibility": {
+          "type": "keyword"
+        },
+        "uri": {
+          "type": "keyword"
+        },
+        "url": {
+          "type": "keyword",
+          "index": false
+        },
+        "created_at": {
+          "type": "date"
+        },
+        "updated_at": {
+          "type": "date"
+        },
+        "in_reply_to_id": {
+          "type": "keyword"
+        },
+        "replies_count": {
+          "type": "integer"
+        },
+        "reblogs_count": {
+          "type": "integer"
+        },
+        "favourites_count": {
+          "type": "integer"
+        },
+        "quotes_count": {
+          "type": "integer"
+        },
+        "sensitive": {
+          "type": "boolean"
+        },
+        "spoiler_text": {
+          "type": "text"
+        },
+        "content": {
+          "type": "text"
+        },
+        "account": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "keyword"
+            },
+            "username": {
+              "type": "keyword"
+            },
+            "acct": {
+              "type": "keyword"
+            },
+            "locked": {
+              "type": "boolean"
+            },
+            "bot": {
+              "type": "boolean"
+            },
+            "created_at": {
+              "type": "date"
+            }
+          }
+        },
+        "tags": {
+          "type": "nested",
+          "properties": {
+            "name": {
+              "type": "keyword"
+            },
+            "url": {
+              "type": "keyword",
+              "index": false
+            }
+          }
+        }
+      }
+    }
+  }
+}

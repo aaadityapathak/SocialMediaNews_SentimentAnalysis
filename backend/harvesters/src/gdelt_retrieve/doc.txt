@@ -1,0 +1,15 @@
+Gdelt doesn't have specific API to call is fully open source it is currently live with its 2.0 versiona 
+and updates it global data set every 15mins in a specific format 
+
+we are currently supporting BOTH version 1.0 (daily) and version 2.0 (15-minute) data fetching.
+2 main types of databases
+1. Events data
+2. Global knowledge graph data (gkg)
+
+We ingest events data and sort it out for daily/15m level ID's and get respective gkg entries 
+and combine them both thorugh ID mapping (using CAMEOEVENTIDs for V1 or URL matching for V2) to create a final csv with unique ID
+made from GlobalEventID+Soureurl to remove duplication.
+
+To Execute please go thorugh all harvestors and gain understanding of functionality of each dataclass, class and module
+the main run pipeline for local run resides in the other folder named backfill_run and this folder contains all processing files 
+for streaming data into the elasticsearch for gdelt events using fission.

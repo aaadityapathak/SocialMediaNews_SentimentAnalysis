@@ -1,0 +1,81 @@
+
+
+\section{Technical Discussion}\label{TechnicalDiscussion}
+
+Now we will describe some of the technical implications and results we found from using our architecture.
+
+\subsection{Extensibility}
+Due to our modular design, it is easy for us to add new data sources to our system, provided we have access to their APIs. Adding a new provider requires implementing the following components:
+\begin{enumerate}
+	\item A provider-specific index on ElasticSearch. This index will store raw data from the provider with little transformation for validation purposes.
+	
+	\item A harvester function. This will be set up to run on a schedule by a Fission timer. This function will gather raw records and push them to the Valkey queue for processing.
+	
+	\item A processor. This is a Python class or module within the processor function that handles the specifics of this provider's raw data. It must convert it to the common schema and assign a relevant ID. The processor will then perform the needed ML inference and push the data to both the provider index and the common index.
+\end{enumerate}
+Once these components are implemented and deployed, harvesting from the new provider can begin, and it will fit in seamlessly with the existing pipeline and other data sources. Once the work for this common framework was done, it was a great benefit to have the shared pipeline across sources to handle our analytical queries.
+
+\subsection{Scalability}
+
+\subsubsection{Components}
+In theory, every component of our architecture is horizontally scalable, which allows for higher volume ingestion, storage and processing. 
+\begin{itemize}
+	\item ElasticSearch clusters can be scaled horizontally, which would expand the storage capacity and database availability if combined with proper replication. In our setup we were constrained to 2 nodes, but this does not have to be the case if more resources are available.
+	
+	\item Fission functions are serverless and instantiated on the fly, so they can also be scaled horizontally as much as the available hardware allows. It is mostly a matter of increasing the allowed concurrency for each function.  We could thus scale the processors and the API functions as much as needed. One can also scale the harvesters, but this depends on the logic for each data source. In our case we were streaming continuously from each provider, so one function sufficed to receive this data. Other cases may benefit from many concurrent harvesters to gather data. One could also use the NewDeploy strategy for Fission, which provides better performance for high-workload functions if sustained high traffic is expected. In our case we made do with the PoolManager deployment strategy.
+	
+	\item Valkey can be scaled horizontally into a cluster as well. This would increase cache capacity for the processing queue and temporary cached values.
+	
+	\item The ML Inference server can also be scaled horizontally if resources are available. With a higher budget, it can also be set to run on a GPU for better performance and inference throughput.
+\end{itemize}
+
+\subsubsection{Experimental Results}
+We got some idea of the challenges that come with scaling our workload during the project. While streaming data with our harvesting functions can produce a constant stream of traffic to the system, it is able to handle it without much issue. The real challenge cam when we performed large-scale backfills of data to the platform. These were done by pushing records directly into the processing queue on Valkey either from a file or a batched API call. In both cases this provided a much more intense and sustained barrage of traffic than we would get from streaming alone. While in theory all our resources can scale horizontally to infinity, we did face a couple challenges and calibration issues to balance the workload.
+\\
+
+With the traffic torrent from backfills, the first bottleneck we found was a mismatch between the concurrency configurations of the processor function and the MQT Trigger on Fission. The trigger had a higher concurrency than the function, and so many dispatches failed due to no function pods being available to process data. This was fixed by increasing the concurrency of the processor function as well.
+\\
+
+The above was a simple configuration fix, but the major bottleneck we found was the ML inference server. When we increased the concurrency of the processor and the trigger too far, past about 120, the ML server started crashing with some frequency. We tried increasing the replica count of the deployment to 2, but this seemed to worsen the issue, as one of the replicas had trouble getting running. One possible explanation is that since performing inference with transformers is a CPU and memory intensive activity (even in our optimised setup), both replicas might have been competing for limited resources with each other and with the other components running on the cluster.
+\\
+
+Thus, we were forced to keep just one replica of the ML server running on the cluster. After some trial and error, we found that we could run 100 concurrent replicas of the processor and trigger with this setup. The ML server continued to crash very occasionally, but considering it was handling dozens of requests per second (2 for each MQT trigger replica, which poll the queue every second), our brave little inference engine help up quite well indeed. With more resources to run the ML server, there is no reason to think we could not greatly increase the throughput of our system.
+
+\subsubsection{Fault Tolerance and Single Points of Failure}
+A critical consideration in our cloud architecture is fault tolerance. By leveraging Kubernetes as our orchestrator, many components are inherently resilient. If a Fission harvester pod or KEDA-triggered processor pod crashes, the Kubernetes control plane detects the failure and automatically spins up a replacement. Furthermore, the use of Valkey as an asynchronous message queue ensures that data is not lost during transient downstream processing outages; messages simply queue up until the processor is back online. The component that proved to be most at risk was the ML Inference server, due to the computational constraints outlined above, but even when this failed, it only caused a temporary outage of processing until a new replica was spun up. The failed jobs were stored in the errors queue and they could simply be rerun once the outage was resolved.
+
+\subsubsection{Testing}
+In order to test the application, we added unit tests to the individual backend components to test the code within them. this helped ensure individual piece worked as expected. We focused on the more crucial pieces of code for testing. Integration tests were more difficult to implement, and we resorted to monitoring the application logs and resources with Kubernetes, as well as ElasticSearch and the processing queues when adding new features to ensure all was working properly. We also added some end-to-end tests for the HTTP API to verify our routing and ElasticSearch queries were in order.
+
+\subsection{Tech Stack Discussion}
+
+\subsubsection{NeCTAR}
+The Melbourne Research Cloud (MRC) provided a nationally funded academic cloud environment that allowed us to deploy a production-grade kubernetes cluster. The native OpenStack integration meant that Terraform could provision and manage all infrastructure resources, including Kubernetes nodes, load balancers, and storage volumes. This allowed us to focus on developing our application rather than managing infrastructure. Naturally one great advantage of working with NeCTAR in our setting is that it is provided for free for academic uses such as ours. 
+\\
+
+A possible disadvantage of working with NeCTAR relative to commercial cloud providers is that the latter tend to have many more managed services, such as Function as a Service frameworks. While Fission proved sufficient for our needs, managing it and the intricacies of its environments and deployment was an ever-present overhead for our development. Another limitation is that our available resources were capped from the start, while in a commercial provider we could have added more nodes if we so desired. Moreover, we did not have access to more powerful compute instances such as instances equipped with GPUs. Such instances would greatly expand the possibilities of what we could accomplish in terms of data enrichment and processing with ML models, for instance.
+
+\subsubsection{Kubernetes}
+Kubernetes itself proved to be a very useful tool, without which we could not have achieved what we did given the time constraints. While there is quite a learning curve when first getting started, once it is up and running, it can greatly reduce the overhead of administering a running complex system.
+\\
+
+With just a few shell commands we could deploy an entire ElasticSearch database cluster, and barring disasters, managing it is straightforward compared to setting up the cluster from scratch on the bare VMs. This is also a huge advantage of containerised applications, which allow quick deployments in this environment while greatly reducing the management overhead.
+\\
+
+Developing with Kubernetes as an orchestrator also has the indirect effect of making our application highly portable, since Kubernetes has become a widespread industry standard. We could just as easily deploy our application on NeCTAR as on a commercial cloud provider or even an on-premises environment provided they have a Kubernetes cluster set up. This portability would be much more difficult to achieve with a commercial provider's specific service offerings for container orchestration, but in exchange for this portability we pay the cost of management overhead of Kubernetes services and a steeper learning curve.
+
+\subsubsection{Fission}
+Fission proved to be a very useful resource for deploying our FaaS components. It provides the automatic management of infrastructure and scaling that one would expect from a FaaS service. This allows one to focus more on the code than the infrastructure requirements, provided one is developing with components that lend themselves well to the FaaS mode. For example, in our use case, the processor and data harvesters are stateless, ephemeral functions that each process a single request, and thus they are the ideal use case for FaaS. This framework also allows us to more easily deal with bursts of traffic such as a surge in activity on a social network or a backfill operation. The use of a Kubernetes-like model of YAML specifications to manage resources also makes it integrate well with the Kubernetes ecosystem we used, and provide a single format for describing resources.
+\\
+
+This being said, Fission in particular did have some limitations. For example, we were forced to create and deploy our own Fission environment in order to us updated versions of Python and our library dependencies. The Python environment is also somewhat constrained by its use of flask as an overall wrapper needed to perform all function calls. One could in theory substitute this for another framework, but this would take considerable effort, which was not a luxury we had.
+\\
+
+Despite its few shortcomings, Fission was still a valuable resource, as it did indeed reduce the overhead of deploying and integrating our code.
+
+\subsubsection{ElasticSearch}
+ElasticSearch is a great tool for this sort of use case. Its distributed architecture makes it ideal for scaling to large volumes of data, and its document-oriented structure makes it easy to deal with the kind of semi-structured data typical of social media APIs. 
+\\
+
+ElasticSearch's powerful query engine also allows one to make expressive queries and time series aggregations. The text search features of the engine are also very powerful and of great value for filtering the noisy text that we encountered. One downside of ElasticSearch, however, is that its query language (DSL) is quite cumbersome and hard to learn. Its other query languages, such as ES|QL, are much more intuitive, but they sill lack the full feature set of the DSL language.
+ 

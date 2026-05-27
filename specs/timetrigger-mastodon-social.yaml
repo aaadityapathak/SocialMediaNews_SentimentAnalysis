@@ -1,0 +1,10 @@
+apiVersion: fission.io/v1
+kind: TimeTrigger
+metadata:
+  name: mastodon-social
+spec:
+  cron: '@every 30s'
+  functionref:
+    functionweights: null
+    name: mastodon-social
+    type: name

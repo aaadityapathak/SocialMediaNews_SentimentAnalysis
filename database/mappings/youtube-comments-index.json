@@ -1,0 +1,49 @@
+{
+	"youtube-comments-idx": {
+		"mappings": {
+			"properties": {
+				"comment_id": {
+					"type": "keyword"
+				},
+				"video_id": {
+					"type": "keyword"
+				},
+				"video_topic": {
+					"type": "keyword"
+				},
+				"video_channel": {
+					"type": "keyword"
+				},
+				"video_published": {
+					"type": "date"
+				},
+				"text": {
+					"type": "text"
+				},
+				"author": {
+					"type": "keyword"
+				},
+				"like_count": {
+					"type": "integer"
+				},
+				"published_at": {
+					"type": "date"
+				},
+				"updated_at": {
+					"type": "date"
+				},
+				"sentiment": {
+					"type": "object",
+					"properties": {
+						"label": {
+							"type": "keyword"
+						},
+						"score": {
+							"type": "float"
+						}
+					}
+				}
+			}
+		}
+	}
+}
