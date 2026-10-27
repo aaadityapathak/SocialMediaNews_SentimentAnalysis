@@ -5,6 +5,13 @@ build/
 dist/
 venv/
 .venv/
+.uv-cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+test-results/
+nltk_data/
 
 # node
 **/node_modules/

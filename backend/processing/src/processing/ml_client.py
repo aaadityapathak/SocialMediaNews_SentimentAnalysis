@@ -23,12 +23,30 @@ class MLServerClient:
     """
 
     def __init__(
-        self, settings: MLServerSettings | None = None, request_timeout: int = 6
+        self,
+        settings: MLServerSettings | None = None,
+        request_timeout: int | None = None,
     ):
         self.__settings = settings or MLServerSettings()
         self.__session = requests.Session()
         self.__session.headers.update({"x-api-key": self.__settings.api_key})
-        self.__timeout = request_timeout
+        self.__timeout = (
+            request_timeout
+            if request_timeout is not None
+            else self.__settings.request_timeout
+        )
+        if self.__timeout <= 0:
+            self.__session.close()
+            raise ValueError("request_timeout must be positive")
+
+    def close(self):
+        self.__session.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
 
     @property
     def settings(self) -> MLServerSettings:
@@ -46,7 +64,7 @@ class MLServerClient:
         rsp = self.__session.post(
             f"{self.settings.host}/api/sentiment",
             json={"text": text},
-            timeout=self.settings.request_timeout,
+            timeout=self.__timeout,
         )
         rsp.raise_for_status()
         return rsp.json()["sentiment"]
@@ -63,7 +81,7 @@ class MLServerClient:
         rsp = self.__session.post(
             f"{self.settings.host}/api/emotion",
             json={"text": text, "threshold": threshold},
-            timeout=self.settings.request_timeout,
+            timeout=self.__timeout,
         )
         rsp.raise_for_status()
         return rsp.json()["emotions"]
@@ -77,7 +95,7 @@ class MLServerClient:
         rsp = self.__session.post(
             f"{self.settings.host}/api/embed",
             json={"text": text},
-            timeout=self.settings.request_timeout,
+            timeout=self.__timeout,
         )
         rsp.raise_for_status()
         return rsp.json()["embedding"]

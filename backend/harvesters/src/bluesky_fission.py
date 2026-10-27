@@ -12,7 +12,7 @@ setup_logging()
 
 def bluesky_stream():
     """
-    Stream broadly AU-relevant data from Bluesky JetStream and store it in Elasticsearch.
+    Stream broadly AU-relevant data from Bluesky JetStream and send it to the processing queue.
     """
     vk_settings = read_from_secret("valkey-cfg", ValkeySettings)
     bs_settings = read_from_secret("bluesky-main", BlueskySettings)

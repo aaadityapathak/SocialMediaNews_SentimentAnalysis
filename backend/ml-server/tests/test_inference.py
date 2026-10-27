@@ -1,3 +1,8 @@
+import pytest
+
+pytestmark = pytest.mark.integration
+
+
 def test_sentiment_analysis_method(inference_service):
     """
     Basic test for sentiment analysis to make sure method runs

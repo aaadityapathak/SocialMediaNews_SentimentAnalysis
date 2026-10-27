@@ -1,221 +1,218 @@
-import os
-import logging
-import datetime as dt
+"""Quota-conscious harvesting of videos, comments, and replies."""
 
+import datetime as dt
+import logging
+import os
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Optional, Iterator, Dict, List
+
+from base import BaseHarvester
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from base import BaseHarvester
+from .api import iter_items, unavailable_comments, utc_datetime
 from .defaults import (
-    MAX_VIDEOS_PER_QUERY,
     MAX_COMMENTS_PER_VIDEO,
     MAX_REPLIES_PER_COMMENT,
+    MAX_VIDEOS_PER_QUERY,
     SEARCH_QUERIES,
 )
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
-)
 log = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
 class YoutubeSearchParams:
-    """
-    Search parameters for the Youtube API.
-    """
+    """Per-query/video limits, independent of the API's page-size limits."""
 
     max_videos: int = MAX_VIDEOS_PER_QUERY
     max_comments: int = MAX_COMMENTS_PER_VIDEO
-    search_queries: Dict[str, List[str]] = field(
-        default_factory=lambda: SEARCH_QUERIES
+    search_queries: dict[str, list[str]] = field(
+        default_factory=lambda: {
+            key: list(value) for key, value in SEARCH_QUERIES.items()
+        }
     )
+    max_replies: int = MAX_REPLIES_PER_COMMENT
+
+    def __post_init__(self):
+        for name in ("max_videos", "max_comments", "max_replies"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
 
 
 class YoutubeHarvester(BaseHarvester[dict]):
-    """
-    Harvester for Youtube Data
-    """
+    """Yield unique videos with bounded comment and reply collections."""
 
-    def __init__(self):
-        self._client = None
+    def __init__(
+        self, api_key=None, search_params=None, client=None, num_retries=3
+    ):
+        if num_retries < 0:
+            raise ValueError("num_retries must be non-negative")
+        self._api_key = api_key
+        self.params = search_params or YoutubeSearchParams()
+        self._client = client
+        self._owns_client = client is None
+        self._num_retries = num_retries
+        self._comment_availability = {}
 
     def _connect(self) -> None:
-        api_key = os.environ["YOUTUBE_API_KEY"]
-        self._client = build("youtube", "v3", developerKey=api_key)
+        api_key = self._api_key or os.environ["YOUTUBE_API_KEY"]
+        self._client = build(
+            "youtube", "v3", developerKey=api_key, cache_discovery=False
+        )
         log.info("Connected to YouTube API")
+
+    def close(self) -> None:
+        if self._owns_client and self._client is not None:
+            try:
+                self._client.close()
+            finally:
+                self._client = None
 
     def _get_videos(
         self, query: str, published_after: str, published_before: str
     ) -> list:
         videos = []
-        try:
-            response = (
-                self._client.search()
-                .list(
-                    q=query,
-                    part="snippet",
-                    type="video",
-                    relevanceLanguage="en",
-                    regionCode="AU",
-                    publishedAfter=published_after,
-                    publishedBefore=published_before,
-                    maxResults=MAX_VIDEOS_PER_QUERY,
-                    order="relevance",
-                )
-                .execute()
+        seen_ids = set()
+        for item in iter_items(
+            self._client.search(),
+            limit=self.params.max_videos,
+            page_size=50,
+            num_retries=self._num_retries,
+            q=query,
+            part="snippet",
+            type="video",
+            relevanceLanguage="en",
+            regionCode="AU",
+            publishedAfter=published_after,
+            publishedBefore=published_before,
+            order="relevance",
+        ):
+            video_id = item["id"]["videoId"]
+            if video_id in seen_ids:
+                continue
+            seen_ids.add(video_id)
+            snippet = item["snippet"]
+            videos.append(
+                {
+                    "video_id": video_id,
+                    "title": snippet["title"],
+                    "channel": snippet["channelTitle"],
+                    "channel_id": snippet["channelId"],
+                    "description": snippet.get("description", ""),
+                    "published": snippet["publishedAt"],
+                    "query": query,
+                }
             )
-
-            for item in response.get("items", []):
-                videos.append(
-                    {
-                        "video_id": item["id"]["videoId"],
-                        "title": item["snippet"]["title"],
-                        "channel": item["snippet"]["channelTitle"],
-                        "channel_id": item["snippet"]["channelId"],
-                        "description": item["snippet"]["description"],
-                        "published": item["snippet"]["publishedAt"],
-                        "query": query,
-                    }
-                )
-
-            log.info(
-                f"YouTube | Found {len(videos)} videos for query: '{query}'"
-            )
-
-            videos = self._filter_videos_without_comments(videos)
-
-            log.info(
-                f"YouTube | {len(videos)} videos with comments for query: '{query}'"
-            )
-
-        except HttpError as e:
-            log.error(f"YouTube | _get_videos Search error for '{query}': {e}")
-
-        return videos
+        return self._filter_videos_without_comments(videos)
 
     def _filter_videos_without_comments(self, videos: list) -> list:
-        if not videos:
-            return videos
-        try:
-            video_ids = [v["video_id"] for v in videos]
+        # A video can match many queries; fetch its statistics only once per run.
+        missing = list(
+            dict.fromkeys(
+                video["video_id"]
+                for video in videos
+                if video["video_id"] not in self._comment_availability
+            )
+        )
+        for offset in range(0, len(missing), 50):
+            batch = missing[offset : offset + 50]
             response = (
                 self._client.videos()
-                .list(part="statistics", id=",".join(video_ids))
-                .execute()
+                .list(part="statistics", id=",".join(batch))
+                .execute(num_retries=self._num_retries)
             )
-            has_comments = {
+            available = {
                 item["id"]
                 for item in response.get("items", [])
                 if int(item.get("statistics", {}).get("commentCount", 0)) > 0
             }
-            log.info(
-                f"YouTube | _filter_videos_without_comments {len(has_comments)} videos with comments"
+            self._comment_availability.update(
+                {key: key in available for key in batch}
             )
-            return [v for v in videos if v["video_id"] in has_comments]
-        except HttpError as e:
-            log.error(f"YouTube | _filter_videos_without_comments error: {e}")
-            return videos
+        return [v for v in videos if self._comment_availability[v["video_id"]]]
 
     def _get_replies(self, comment_id: str) -> list:
         replies = []
+        seen_ids = set()
         try:
-            request = self._client.comments().list(
+            for item in iter_items(
+                self._client.comments(),
+                limit=self.params.max_replies,
+                page_size=100,
+                num_retries=self._num_retries,
                 part="snippet",
                 parentId=comment_id,
-                maxResults=MAX_REPLIES_PER_COMMENT,
                 textFormat="plainText",
-            )
-            while request:
-                response = request.execute()
-                for item in response.get("items", []):
-                    snippet = item["snippet"]
-                    snippet["reply_id"] = item["id"]
-                    replies.append(snippet)
-
-                if (
-                    "nextPageToken" in response
-                    and len(replies) < MAX_REPLIES_PER_COMMENT
-                ):
-                    request = self._client.comments().list(
-                        part="snippet",
-                        parentId=comment_id,
-                        maxResults=MAX_REPLIES_PER_COMMENT,
-                        pageToken=response["nextPageToken"],
-                        textFormat="plainText",
-                    )
-                else:
-                    break
-
-        except HttpError as e:
-            log.error(
-                f"YouTube | _get_replies error for comment {comment_id}: {e}"
-            )
-
+            ):
+                if item["id"] not in seen_ids:
+                    seen_ids.add(item["id"])
+                    replies.append({**item["snippet"], "reply_id": item["id"]})
+        except HttpError as error:
+            if not unavailable_comments(error):
+                raise
+            log.info("Replies unavailable for comment %s", comment_id)
         return replies
 
     def _get_comments(
-        self, video_id: str, published_after: Optional[str] = None
+        self, video_id: str, published_after: str | None = None
     ) -> list:
         comments = []
+        seen_ids = set()
+        cutoff = utc_datetime(published_after) if published_after else None
         try:
-            request = self._client.commentThreads().list(
-                part="snippet",
+            for item in iter_items(
+                self._client.commentThreads(),
+                limit=self.params.max_comments,
+                page_size=100,
+                num_retries=self._num_retries,
+                part="snippet,replies",
                 videoId=video_id,
-                maxResults=MAX_COMMENTS_PER_VIDEO,
                 order="time",
                 textFormat="plainText",
-            )
-
-            while request:
-                response = request.execute()
-                for item in response.get("items", []):
-                    comment_id = item["snippet"]["topLevelComment"]["id"]
-                    snippet = item["snippet"]["topLevelComment"]["snippet"]
-                    snippet["comment_id"] = comment_id
-
-                    if (
-                        published_after
-                        and snippet.get("publishedAt", "") < published_after
-                    ):
-                        continue
-
-                    if item["snippet"]["totalReplyCount"] > 0:
-                        snippet["replies"] = self._get_replies(comment_id)
-                    else:
-                        snippet["replies"] = []
-
-                    comments.append(snippet)
-
-                if (
-                    "nextPageToken" in response
-                    and len(comments) < MAX_COMMENTS_PER_VIDEO
-                ):
-                    request = self._client.commentThreads().list(
-                        part="snippet",
-                        videoId=video_id,
-                        maxResults=MAX_COMMENTS_PER_VIDEO,
-                        pageToken=response["nextPageToken"],
-                        textFormat="plainText",
-                    )
-                else:
+            ):
+                top = item["snippet"]["topLevelComment"]
+                comment_id = top["id"]
+                snippet = {**top["snippet"], "comment_id": comment_id}
+                # Every page is ordered newest first: no older pages are needed.
+                if cutoff and utc_datetime(snippet["publishedAt"]) < cutoff:
                     break
-
-        except HttpError as e:
-            log.error(f"YouTube | _get_comments error for {video_id}: {e}")
-
+                if comment_id in seen_ids:
+                    continue
+                seen_ids.add(comment_id)
+                total = item["snippet"].get("totalReplyCount", 0)
+                embedded = list(
+                    {
+                        reply["id"]: reply
+                        for reply in item.get("replies", {}).get("comments", [])
+                    }.values()
+                )
+                needed = min(total, self.params.max_replies)
+                if len(embedded) >= needed:
+                    snippet["replies"] = [
+                        {**reply["snippet"], "reply_id": reply["id"]}
+                        for reply in embedded[:needed]
+                    ]
+                else:
+                    snippet["replies"] = self._get_replies(comment_id)
+                comments.append(snippet)
+        except HttpError as error:
+            if not unavailable_comments(error):
+                raise
+            log.info("Comments unavailable for video %s", video_id)
         return comments
 
     def _collect(
         self, start_date: str, end_date: str, queries: dict
     ) -> Iterator[dict]:
-        all_data = []
         seen_ids = set()
-
+        seen_queries = set()
         for topic, topic_queries in queries.items():
             for query in topic_queries:
+                if query in seen_queries:
+                    continue
+                seen_queries.add(query)
                 for video in self._get_videos(query, start_date, end_date):
                     if video["video_id"] in seen_ids:
                         continue
@@ -225,16 +222,23 @@ class YoutubeHarvester(BaseHarvester[dict]):
                         video["video_id"], published_after=start_date
                     )
                     yield video
-
-        log.info(
-            f"YouTube | _collect | {start_date} and {end_date} | {len(all_data)} unique videos"
-        )
+        log.info("YouTube collected %d unique videos", len(seen_ids))
 
     def run(
         self, start_date: dt.datetime, end_date: dt.datetime, **kwargs
     ) -> Iterator[dict]:
-        queries = kwargs.get("queries", SEARCH_QUERIES)
-        self._connect()
-        yield from self._collect(
-            start_date.isoformat(), end_date.isoformat(), queries
-        )
+        start, end = utc_datetime(start_date), utc_datetime(end_date)
+        if start >= end:
+            raise ValueError("start_date must be earlier than end_date")
+        queries = kwargs.get("queries", self.params.search_queries)
+        if not queries or self.params.max_videos == 0:
+            return
+        self._comment_availability.clear()
+        try:
+            if self._client is None:
+                self._connect()
+            yield from self._collect(
+                start.isoformat(), end.isoformat(), queries
+            )
+        finally:
+            self.close()

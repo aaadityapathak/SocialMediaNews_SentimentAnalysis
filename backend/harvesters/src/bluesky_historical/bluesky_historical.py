@@ -1,9 +1,10 @@
 import asyncio
 import logging
-import re
 import json
+import tempfile
+from collections import OrderedDict
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
@@ -11,184 +12,23 @@ import fire
 import httpx
 from valkey.asyncio import Valkey
 from elasticsearch import AsyncElasticsearch
-from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from base import setup_logging
 from elastic import ESSettings
+from valkey_settings import ValkeySettings
+from bluesky.filters import contains_keyword as _contains_keyword
 
 setup_logging()
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_AU_SEARCH_QUERIES = [
-    "auspol",
-    "ausvotes",
-    "australian government",
-    "australia voting",
-    "australian elections",
-    "australia politics",
-    "australian federal election",
-    "election day australia",
-    "labor party australia",
-    "liberal party australia",
-    "australian greens",
-    "the nationals australia",
-    "one nation australia",
-    "teal independent",
-    "anthony albanese",
-    "peter dutton",
-    "adam bandt",
-    "jim chalmers",
-    "sussan ley",
-    "cost of living australia",
-    "housing australia",
-]
-
-STRONG_AU_KEYWORDS = [
-    "australia",
-    "australian",
-    "aussie",
-    "aussies",
-    "auspol",
-    "ausvotes",
-    "ausvotes25",
-    "ausvotes2025",
-    "new south wales",
-    "queensland",
-    "south australia",
-    "western australia",
-    "tasmania",
-    "northern territory",
-    "abc australia",
-    "sbs australia",
-    "guardian australia",
-    "the australian",
-    "straya",
-    "labor party",
-    "labour party",
-    "liberal party",
-    "australian greens",
-    "the nationals",
-    "federal election",
-    "australian federal election",
-    "election day",
-    "polling booth",
-    "preferential voting",
-    "senate australia",
-]
-
-MEDIUM_AU_KEYWORDS = [
-    "victoria state",
-    "state of victoria",
-    "victorian government",
-    "victorian parliament",
-    "nsw government",
-    "nsw parliament",
-    "qld government",
-    "queensland government",
-    "nswpol",
-    "vicpol",
-    "qldpol",
-    "melbourne vic",
-    "melbourne victoria",
-    "sydney nsw",
-    "brisbane qld",
-    "canberra act",
-    "adelaide sa",
-    "perth wa",
-    "hobart tas",
-    "darwin nt",
-    "gold coast qld",
-    "gold coast queensland",
-    "geelong vic",
-    "geelong victoria",
-    "cairns queensland",
-    "wollongong nsw",
-    "teals",
-    "teal independent",
-    "pauline hanson",
-    "peter dutton",
-    "adam bandt",
-    "penny wong",
-    "jim chalmers",
-    "tanya plibersek",
-    "sussan ley",
-    "david littleproud",
-    "jacqui lambie",
-    "andrew wilkie",
-    "david pocock",
-    "cost of living",
-    "housing crisis",
-    "abc news",
-    "sky news australia",
-    "news.com.au",
-    "marginal seat",
-    "two party preferred",
-    "primary vote",
-]
-
-WEAK_CITY_KEYWORDS = [
-    "victoria",
-    "melbourne",
-    "sydney",
-    "canberra",
-    "adelaide",
-    "brisbane",
-    "perth",
-    "hobart",
-    "darwin",
-    "geelong",
-    "gold coast",
-    "sunshine coast",
-    "newcastle",
-    "wollongong",
-    "ballarat",
-    "bendigo",
-    "toowoomba",
-    "townsville",
-    "cairns",
-    "launceston",
-    "alp",
-    "nlp",
-    "one nation",
-    "greens",
-    "senate",
-    "parliament",
-    "electorate",
-    "albo",
-    "dutton",
-    "bandt",
-]
-
-
-class BlueskyHistoricalSettings(BaseSettings):
-    base_url: str = Field(default="https://bsky.social")
-    create_session_endpoint: str = Field(
-        default="/xrpc/com.atproto.server.createSession"
-    )
-    search_endpoint: str = Field(default="/xrpc/app.bsky.feed.searchPosts")
-
-    handle: str = Field(description="Bluesky handle / identifier")
-    app_password: str = Field(description="Bluesky app password")
-
-    user_agent: str = Field(default="unimelb-comp90024-t23-historical")
-    timeout_seconds: float = Field(default=30.0, gt=0)
-
-    index_name: str = Field(default="bluesky-historical-idx")
-    page_size: int = Field(default=100, ge=1, le=100)
-    max_pages: int = Field(default=5, ge=1)
-
-    # Melbourne 2026-05-10 00:00 = UTC 2026-05-09T14:00:00Z
-    cutoff_before: str = Field(default="2026-05-09T14:00:00Z")
-    split_by_3day: bool = Field(default=True)
-
-    model_config = SettingsConfigDict(env_prefix="BLUESKY_")
-
-    max_retries: int = Field(default=3, ge=0)
-    retry_backoff_seconds: float = Field(default=2.0, gt=0)
-    continue_on_error: bool = Field(default=True)
-    checkpoint_path: str = Field(default="bluesky_historical_checkpoint.json")
+from .settings import (
+    BlueskyHistoricalSettings,
+    DEFAULT_AU_SEARCH_QUERIES,
+    STRONG_AU_KEYWORDS,
+    MEDIUM_AU_KEYWORDS,
+    WEAK_CITY_KEYWORDS,
+)
 
 
 def _parse_dt(value: str | None) -> datetime | None:
@@ -268,14 +108,6 @@ def _matched_keywords(text: str | None, keywords: list[str]) -> list[str]:
     return [kw for kw in keywords if kw in lowered]
 
 
-def _contains_keyword(text: str, keyword: str) -> bool:
-    text = text.lower()
-    keyword = keyword.lower()
-    if " " in keyword:
-        return keyword in text
-    return re.search(rf"\b{re.escape(keyword)}\b", text) is not None
-
-
 def _count_keyword_hits(text: str, keywords: list[str]) -> int:
     return sum(1 for kw in keywords if _contains_keyword(text, kw))
 
@@ -284,16 +116,16 @@ def _is_au_relevant(text: str | None) -> bool:
     if not isinstance(text, str) or not text.strip():
         return False
 
-    strong_hits = _count_keyword_hits(text, STRONG_AU_KEYWORDS)
-    medium_hits = _count_keyword_hits(text, MEDIUM_AU_KEYWORDS)
-    weak_hits = _count_keyword_hits(text, WEAK_CITY_KEYWORDS)
-
-    if strong_hits >= 1:
+    if any(_contains_keyword(text, kw) for kw in STRONG_AU_KEYWORDS):
         return True
-    if medium_hits >= 1:
+    if any(_contains_keyword(text, kw) for kw in MEDIUM_AU_KEYWORDS):
         return True
-    if weak_hits >= 2:
-        return True
+    hits = 0
+    for keyword in WEAK_CITY_KEYWORDS:
+        if _contains_keyword(text, keyword):
+            hits += 1
+            if hits == 2:
+                return True
     return False
 
 
@@ -333,14 +165,23 @@ class BlueskyHistoricalCollector:
     settings: BlueskyHistoricalSettings
     es: AsyncElasticsearch | None = None
     vk: Valkey | None = None
+    _recent_ids: OrderedDict = field(
+        default_factory=OrderedDict, init=False, repr=False
+    )
 
     def write_checkpoint(self, payload: dict[str, Any]) -> None:
         path = Path(self.settings.checkpoint_path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        # Atomic replacement avoids a half-written checkpoint after interruption.
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, delete=False
+        ) as output:
+            temp_path = Path(output.name)
+            json.dump(payload, output, ensure_ascii=False, indent=2)
+        try:
+            temp_path.replace(path)
+        finally:
+            temp_path.unlink(missing_ok=True)
 
     async def create_session(self, client: httpx.AsyncClient) -> str:
         payload = {
@@ -414,9 +255,18 @@ class BlueskyHistoricalCollector:
                 if (not retryable) or attempt >= self.settings.max_retries:
                     raise
 
-                wait_seconds = self.settings.retry_backoff_seconds * (
-                    2**attempt
+                wait_seconds = min(
+                    30.0, self.settings.retry_backoff_seconds * 2**attempt
                 )
+                if isinstance(exc, httpx.HTTPStatusError):
+                    retry_after = exc.response.headers.get("Retry-After")
+                    if retry_after:
+                        try:
+                            wait_seconds = min(
+                                300.0, max(0.0, float(retry_after))
+                            )
+                        except ValueError:
+                            pass
                 logger.warning(
                     "Retryable error for query='%s' cursor=%s since=%s until=%s "
                     "| status=%s | attempt=%s/%s | waiting %.1fs",
@@ -482,28 +332,71 @@ class BlueskyHistoricalCollector:
         return f"{did}:{rkey}"
 
     async def index_batch(self, docs: list[dict[str, Any]]) -> int:
-        if not docs or self.es is None:
+        """Check and queue bounded batches, with batched existence and writes.
+
+        The common ``social-posts-index`` must already exist. Missing-index or
+        partial mget failures propagate, so an unavailable deduplication index
+        never silently queues unchecked records.
+        """
+        if not docs:
             return 0
-
-        total = 0
+        if self.es is None or self.vk is None:
+            raise RuntimeError("Elasticsearch and Valkey clients are required")
+        unique = {}
         for doc in docs:
-            doc_id = self.make_doc_id(doc)
-            exists = await self.es.exists(
-                index="social-posts-index", id=f"bluesky-{doc_id}"
+            if not doc.get("did") or not (doc.get("commit") or {}).get("rkey"):
+                raise ValueError(
+                    "Bluesky documents require a DID and record key"
+                )
+            ident = self.make_doc_id(doc)
+            if ident not in self._recent_ids:
+                unique[ident] = doc
+        entries = list(unique.items())
+        total = 0
+        batch_size = min(self.settings.batch_size, self.settings.queue_limit)
+        for offset in range(0, len(entries), batch_size):
+            batch = entries[offset : offset + batch_size]
+            response = await self.es.mget(
+                index="social-posts-index",
+                ids=[f"bluesky-{ident}" for ident, _ in batch],
+                source=False,
             )
-            if exists:
+            existing = response.get("docs", [])
+            if len(existing) != len(batch) or any(
+                "error" in item for item in existing
+            ):
+                raise RuntimeError("Unable to check existing Bluesky documents")
+            pending = [
+                (ident, doc)
+                for (ident, doc), item in zip(batch, existing)
+                if not item.get("found", False)
+            ]
+            if not pending:
                 continue
-
-            to_insert = {
-                "source": "bluesky",
-                "data": doc,
-            }
-            await self.vk.lpush("social-posts-index", json.dumps(to_insert))
-            await asyncio.sleep(0.032)
-            total += 1
-
-        if await self.vk.llen("social-posts-index") > 12_000:
-            await asyncio.sleep(15.0)
+            deadline = (
+                asyncio.get_running_loop().time()
+                + self.settings.queue_wait_seconds
+            )
+            while (
+                await self.vk.llen("social-posts-index") + len(pending)
+                > self.settings.queue_limit
+            ):
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise TimeoutError("Bluesky processing queue remained full")
+                await asyncio.sleep(min(1.0, remaining))
+            await self.vk.lpush(
+                "social-posts-index",
+                *(
+                    json.dumps({"source": "bluesky", "data": doc})
+                    for _, doc in pending
+                ),
+            )
+            total += len(pending)
+            for ident, _ in pending:
+                self._recent_ids[ident] = None
+                if len(self._recent_ids) > self.settings.recent_ids_limit:
+                    self._recent_ids.popitem(last=False)
         return total
 
     async def collect_query(
@@ -521,6 +414,9 @@ class BlueskyHistoricalCollector:
         indexed = 0
         pages = 0
         cursor: str | None = None
+        seen_cursors: set[str] = set()
+        failed = False
+        error_message = None
         query_keywords = _normalise_keywords(query)
 
         self.write_checkpoint(
@@ -575,6 +471,8 @@ class BlueskyHistoricalCollector:
                 )
 
                 if self.settings.continue_on_error:
+                    failed = True
+                    error_message = str(exc)
                     break
                 raise
 
@@ -600,7 +498,11 @@ class BlueskyHistoricalCollector:
                 if not _is_au_relevant(text):
                     continue
 
-                kept_docs.append(self.normalise_post(post, query_keywords))
+                document = self.normalise_post(post, query_keywords)
+                if document.get("did") and (document.get("commit") or {}).get(
+                    "rkey"
+                ):
+                    kept_docs.append(document)
 
             kept += len(kept_docs)
 
@@ -636,6 +538,15 @@ class BlueskyHistoricalCollector:
                 }
             )
 
+            if cursor in seen_cursors:
+                logger.warning("Repeated Bluesky search cursor; stopping query")
+                failed = True
+                error_message = "Repeated search cursor prevented pagination"
+                if not self.settings.continue_on_error:
+                    raise RuntimeError(error_message)
+                break
+            if cursor:
+                seen_cursors.add(cursor)
             if not cursor:
                 logger.info(
                     "No cursor returned for query '%s', stopping.", query
@@ -647,7 +558,9 @@ class BlueskyHistoricalCollector:
         self.write_checkpoint(
             {
                 "updated_at": _utc_now_iso(),
-                "status": "query_finished",
+                "status": "query_error" if failed else "query_finished",
+                "failed_queries": int(failed),
+                "error": error_message,
                 "query": query,
                 "since": since,
                 "until": until,
@@ -664,6 +577,7 @@ class BlueskyHistoricalCollector:
             "fetched": fetched,
             "kept": kept,
             "indexed": indexed,
+            "failed_queries": int(failed),
         }
 
     async def collect_window(
@@ -680,6 +594,7 @@ class BlueskyHistoricalCollector:
         total_fetched = 0
         total_kept = 0
         total_indexed = 0
+        failed_queries = 0
 
         logger.info("Starting window since=%s until=%s", since, until)
 
@@ -732,6 +647,7 @@ class BlueskyHistoricalCollector:
                 )
 
                 if self.settings.continue_on_error:
+                    failed_queries += 1
                     continue
                 raise
 
@@ -739,6 +655,7 @@ class BlueskyHistoricalCollector:
             total_fetched += result["fetched"]
             total_kept += result["kept"]
             total_indexed += result["indexed"]
+            failed_queries += result["failed_queries"]
 
         logger.info(
             "Finished window since=%s until=%s | pages=%s | fetched=%s | kept=%s | indexed=%s",
@@ -753,7 +670,10 @@ class BlueskyHistoricalCollector:
         self.write_checkpoint(
             {
                 "updated_at": _utc_now_iso(),
-                "status": "window_finished",
+                "status": "window_partial"
+                if failed_queries
+                else "window_finished",
+                "failed_queries": failed_queries,
                 "since": since,
                 "until": until,
                 "pages": total_pages,
@@ -768,6 +688,8 @@ class BlueskyHistoricalCollector:
             "fetched": total_fetched,
             "kept": total_kept,
             "indexed": total_indexed,
+            "failed_queries": failed_queries,
+            "failed_windows": int(failed_queries > 0),
         }
 
     async def collect(
@@ -785,6 +707,8 @@ class BlueskyHistoricalCollector:
 
         total_queries = 0
         total_windows = 0
+        failed_queries = 0
+        failed_windows = 0
         total_pages = 0
         total_fetched = 0
         total_kept = 0
@@ -812,15 +736,29 @@ class BlueskyHistoricalCollector:
                 total_fetched += result["fetched"]
                 total_kept += result["kept"]
                 total_indexed += result["indexed"]
+                failed_queries += result["failed_queries"]
+                failed_windows += result["failed_windows"]
 
-        return {
+        summary = {
             "windows": total_windows,
             "queries": total_queries,
             "pages": total_pages,
             "fetched": total_fetched,
             "kept": total_kept,
             "indexed": total_indexed,
+            "failed_queries": failed_queries,
+            "failed_windows": failed_windows,
         }
+        self.write_checkpoint(
+            {
+                "updated_at": _utc_now_iso(),
+                "status": "collection_partial"
+                if failed_queries
+                else "collection_finished",
+                **summary,
+            }
+        )
+        return summary
 
 
 async def search_and_index(
@@ -857,15 +795,16 @@ async def search_and_index(
         api_key=es_settings.api_key,
         verify_certs=False,
     ) as es:
-        vk = Valkey()
-        collector = BlueskyHistoricalCollector(hist_settings, es, vk)
-        return await collector.collect(
-            queries=query_list,
-            sort=sort,
-            since=since,
-            until=until,
-            dry_run=False,
-        )
+        vk_settings = ValkeySettings()
+        async with Valkey(host=vk_settings.host, port=vk_settings.port) as vk:
+            collector = BlueskyHistoricalCollector(hist_settings, es, vk)
+            return await collector.collect(
+                queries=query_list,
+                sort=sort,
+                since=since,
+                until=until,
+                dry_run=False,
+            )
 
 
 def run(

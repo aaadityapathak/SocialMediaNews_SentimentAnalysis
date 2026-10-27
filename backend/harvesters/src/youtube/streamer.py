@@ -1,28 +1,34 @@
-# Team 23 — COMP90024 — YouTube Streamer
-import os
+"""Publish normalized YouTube records using bounded Valkey batches."""
+
 import json
 import logging
-from valkey import Valkey
+from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from .youtube import YoutubeHarvester
+from valkey import Valkey
+
+from .records import (
+    comment_record,
+    iter_records,
+    reply_record,
+    video_record,
+    wrap_record,
+)
 from .settings import YoutubeSettings
-from .defaults import SEARCH_QUERIES
+from .youtube import YoutubeHarvester, YoutubeSearchParams
 
 log = logging.getLogger(__name__)
 
 VIDEOS_INDEX = "youtube-videos-idx"
 COMMENTS_INDEX = "youtube-comments-idx"
 REPLIES_INDEX = "youtube-replies-idx"
+QUEUE_NAME = "social-posts-index"
 
 
 @dataclass(frozen=True)
 class YoutubeStreamer:
-    """
-    Harvests YouTube data and indexes it across three ElasticSearch indices:
-    videos, comments, and replies.
-    """
+    """Harvest and enqueue videos, comments, and replies for processing."""
 
     settings: YoutubeSettings = field(default_factory=YoutubeSettings)
 
@@ -31,89 +37,65 @@ class YoutubeStreamer:
         vk: Valkey,
         start: datetime,
         end: datetime,
-        queries: dict = None,
+        queries: dict | None = None,
     ) -> dict:
-        """
-        Run the YouTube harvester for the given time window and push all
-        results into Valkey for processing. Returns counts per index.
-        :param vk: Valkey client
-        :param start: Start of the harvest window
-        :param end: End of the harvest window
-        :param queries: Topic → search queries dict; defaults to SEARCH_QUERIES
-        :return: {"videos": int, "comments": int, "replies": int}
-        """
-        os.environ["YOUTUBE_API_KEY"] = self.settings.api_key
-        harvester = YoutubeHarvester()
-        counts = {"videos": 0, "comments": 0, "replies": 0}
-
-        for video in harvester.run(
-            start, end, queries=queries or SEARCH_QUERIES
-        ):
-            self._index_video(vk, video)
-            counts["videos"] += 1
-
-            if video.get("comments"):
-                for comment in video["comments"]:
-                    self._index_comment(vk, comment, video)
-                    counts["comments"] += 1
-
-                    if comment.get("replies"):
-                        for reply in comment["replies"]:
-                            self._index_reply(vk, reply, comment, video)
-                            counts["replies"] += 1
-
-        log.info(
-            "YouTube harvest complete: %d videos, %d comments, %d replies",
-            counts["videos"],
-            counts["comments"],
-            counts["replies"],
+        params = YoutubeSearchParams(
+            max_videos=self.settings.max_videos,
+            max_comments=self.settings.max_comments,
+            max_replies=self.settings.max_replies,
         )
+        harvester = YoutubeHarvester(
+            api_key=self.settings.api_key,
+            search_params=params,
+            num_retries=self.settings.max_retries,
+        )
+        counts = {"videos": 0, "comments": 0, "replies": 0}
+        count_keys = {
+            "video": "videos",
+            "comment": "comments",
+            "reply": "replies",
+        }
+        harvest_queries = params.search_queries if queries is None else queries
+        # Explicitly close the generator if publishing raises midway through it.
+        with closing(
+            harvester.run(start, end, queries=harvest_queries)
+        ) as videos:
+            for video in videos:
+                messages = []
+                kinds = []
+                for kind, record in iter_records(video):
+                    messages.append(json.dumps(wrap_record(kind, record)))
+                    kinds.append(kind)
+                    if len(messages) >= self.settings.queue_batch_size:
+                        vk.lpush(QUEUE_NAME, *messages)
+                        for queued_kind in kinds:
+                            counts[count_keys[queued_kind]] += 1
+                        messages.clear()
+                        kinds.clear()
+                if messages:
+                    vk.lpush(QUEUE_NAME, *messages)
+                    for queued_kind in kinds:
+                        counts[count_keys[queued_kind]] += 1
+        log.info("YouTube harvest complete: %s", counts)
         return counts
 
     def _index_video(self, vk: Valkey, video: dict) -> None:
-        doc = {k: v for k, v in video.items() if k != "comments"}
-        wrapped = {
-            "source": "youtube",
-            "data": {"kind": "video", "record": doc},
-        }
-        vk.lpush("social-posts-index", json.dumps(wrapped))
+        vk.lpush(
+            QUEUE_NAME, json.dumps(wrap_record("video", video_record(video)))
+        )
 
     def _index_comment(self, vk: Valkey, comment: dict, video: dict) -> None:
-        doc = {
-            "comment_id": comment["comment_id"],
-            "video_id": video["video_id"],
-            "video_topic": video["topic"],
-            "video_channel": video["channel"],
-            "video_published": video["published"],
-            "text": comment.get("textOriginal", ""),
-            "author": comment.get("authorDisplayName", ""),
-            "like_count": comment.get("likeCount", 0),
-            "published_at": comment.get("publishedAt"),
-            "updated_at": comment.get("updatedAt"),
-        }
-        wrapped = {
-            "source": "youtube",
-            "data": {"kind": "comment", "record": doc},
-        }
-        vk.lpush("social-posts-index", json.dumps(wrapped))
+        vk.lpush(
+            QUEUE_NAME,
+            json.dumps(wrap_record("comment", comment_record(comment, video))),
+        )
 
     def _index_reply(
         self, vk: Valkey, reply: dict, comment: dict, video: dict
     ) -> None:
-        doc = {
-            "reply_id": reply["reply_id"],
-            "comment_id": comment["comment_id"],
-            "video_id": video["video_id"],
-            "video_topic": video["topic"],
-            "video_channel": video["channel"],
-            "text": reply.get("textOriginal", ""),
-            "author": reply.get("authorDisplayName", ""),
-            "like_count": reply.get("likeCount", 0),
-            "published_at": reply.get("publishedAt"),
-            "updated_at": reply.get("updatedAt"),
-        }
-        wrapped = {
-            "source": "youtube",
-            "data": {"kind": "reply", "record": doc},
-        }
-        vk.lpush("social-posts-index", json.dumps(wrapped))
+        vk.lpush(
+            QUEUE_NAME,
+            json.dumps(
+                wrap_record("reply", reply_record(reply, comment, video))
+            ),
+        )

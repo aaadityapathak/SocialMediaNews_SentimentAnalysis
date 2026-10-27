@@ -1,124 +1,118 @@
-import time
+"""Join and stream a GDELT update without materializing all enriched documents."""
+
 import logging
-import requests
 import tempfile
+from collections import defaultdict
 from datetime import datetime
+from pathlib import Path
+from urllib.parse import urlsplit
 
+import requests
+
+from .file_client import create_session
 from .harvesters import EventsHarvester, GkgHarvester
+from .schemas import USEFUL_COLUMNS, upload_to_elasticsearch
 from .settings import GdeltStreamSettings
-from .schemas import upload_to_elasticsearch, USEFUL_COLUMNS
 
-logger = logging.getLogger("gdelt_streamer")
+logger = logging.getLogger(__name__)
 
 
 def get_latest_gdelt_timestamp(url: str) -> datetime | None:
     try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        first_line = response.text.strip().split("\n")[0]
-        file_url = first_line.split(" ")[2]
-        timestamp_str = file_url.split("/")[-1].split(".")[0]
-        return datetime.strptime(timestamp_str, "%Y%m%d%H%M%S")
-    except Exception as e:
-        logger.error(f"Failed to fetch latest GDELT update: {e}")
+        with (
+            create_session() as session,
+            session.get(url, timeout=(10, 10)) as response,
+        ):
+            response.raise_for_status()
+            for line in response.text.splitlines():
+                fields = line.split()
+                if len(fields) != 3:
+                    continue
+                filename = urlsplit(fields[2]).path.rsplit("/", 1)[-1]
+                if filename.endswith(".export.CSV.zip"):
+                    return datetime.strptime(
+                        filename.split(".")[0], "%Y%m%d%H%M%S"
+                    )
+        raise ValueError("No event archive found in update manifest")
+    except (requests.RequestException, ValueError) as exc:
+        logger.error("Failed to fetch latest GDELT update: %s", exc)
         return None
+
+
+def iter_joined_records(events, gkg_records, target_datetime=None):
+    """Yield every matching event, including events sharing an article URL."""
+    by_id = {event.GlobalEventID: event for event in events}
+    by_url = defaultdict(list)
+    for event in by_id.values():
+        if event.SourceURL:
+            by_url[event.SourceURL].append(event)
+    seen = set()
+    for gkg in gkg_records:
+        matches = {
+            eid.strip(): by_id[eid.strip()]
+            for eid in gkg.CAMEOEVENTIDS.split(",")
+            if eid.strip() in by_id
+        }
+        urls = (
+            [gkg.SOURCEURLS]
+            if gkg.SOURCEURLS in by_url
+            else gkg.SOURCEURLS.split(";")
+        )
+        for url in urls:
+            for event in by_url.get(url.strip(), ()):
+                matches[event.GlobalEventID] = event
+        for event in matches.values():
+            key = (event.GlobalEventID, event.SourceURL)
+            if key in seen:
+                continue
+            seen.add(key)
+            row = {
+                key: getattr(event, key)
+                for key in USEFUL_COLUMNS
+                if hasattr(event, key)
+            }
+            row.update(
+                GKG_THEMES=gkg.THEMES,
+                GKG_PERSONS=gkg.PERSONS,
+                GKG_ORGANIZATIONS=gkg.ORGANIZATIONS,
+                GKG_TONE=gkg.TONE,
+            )
+            if target_datetime is not None:
+                row["DateAdded"] = target_datetime.strftime("%Y%m%d%H%M%S")
+            yield row
 
 
 def process_and_stream_batch(
     target_datetime: datetime, settings: GdeltStreamSettings, es_client
 ) -> int:
-    time.sleep(5)
-
-    with tempfile.TemporaryDirectory() as temp_raw_dir:
-        event_harvester = EventsHarvester(raw_dir=temp_raw_dir)
-        gkg_harvester = GkgHarvester(raw_dir=temp_raw_dir)
-
-        logger.info(f"--- Harvesting Events for {target_datetime} ---")
-        aus_events_dict = {}
-
-        for record in event_harvester.run(
-            start_date=target_datetime,
-            end_date=target_datetime,
-            interval="15m",
-            delete_raw=True,
-            adm1_code=None,
-            actor_cameo=None,
-        ):
-            aus_events_dict[record.GlobalEventID] = record
-
-        logger.info(f"Found {len(aus_events_dict)} events for target region.")
-
-        if not aus_events_dict:
-            logger.info("Skipping GKG extraction (no regional events found).")
-            return 0
-
-        logger.info("--- Harvesting GKG & Mapping (Dropping Duplicates) ---")
-        combined_dictionaries = []
-        victoria_urls_dict = {
-            ev.SourceURL: ev for ev in aus_events_dict.values() if ev.SourceURL
-        }
-
-        for gkg_record in gkg_harvester.run(
-            start_date=target_datetime,
-            end_date=target_datetime,
-            interval="15m",
-            delete_raw=True,
-            adm1_code=None,
-        ):
-            event_match = None
-
-            if gkg_record.CAMEOEVENTIDS:
-                linked_ids = [
-                    eid.strip()
-                    for eid in gkg_record.CAMEOEVENTIDS.split(",")
-                    if eid.strip()
-                ]
-                for eid in linked_ids:
-                    if eid in aus_events_dict:
-                        event_match = aus_events_dict[eid]
-                        break
-
-            if (
-                not event_match
-                and gkg_record.SOURCEURLS
-                and gkg_record.SOURCEURLS in victoria_urls_dict
-            ):
-                event_match = victoria_urls_dict[gkg_record.SOURCEURLS]
-
-            if event_match:
-                combined_dict = dict(
-                    zip(EventsHarvester.COLUMN_HEADERS, event_match.to_row())
-                )
-
-                combined_dict["GKG_COUNTS"] = gkg_record.COUNTS
-                combined_dict["GKG_THEMES"] = gkg_record.THEMES
-                combined_dict["GKG_PERSONS"] = gkg_record.PERSONS
-                combined_dict["GKG_ORGANIZATIONS"] = gkg_record.ORGANIZATIONS
-                combined_dict["GKG_TONE"] = gkg_record.TONE
-
-                # --- EXACT TIMESTAMP FIX ---
-                combined_dict["DateAdded"] = target_datetime.strftime(
-                    "%Y%m%d%H%M%S"
-                )
-
-                # --- INSTANT COLUMN FILTERING ---
-                filtered_dict = {
-                    k: combined_dict[k]
-                    for k in USEFUL_COLUMNS
-                    if k in combined_dict
-                }
-                combined_dictionaries.append(filtered_dict)
-
-        if combined_dictionaries:
-            unique_dicts = {
-                f"{d['GlobalEventID']}_{d['SourceURL']}": d
-                for d in combined_dictionaries
-            }
-            success_count = upload_to_elasticsearch(
-                es_client,
-                list(unique_dicts.values()),
-                index_name="gdelt-index",
+    Path(settings.raw_dir).mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=settings.raw_dir) as raw_dir:
+        events = list(
+            EventsHarvester(raw_dir=raw_dir).run(
+                start_date=target_datetime,
+                end_date=target_datetime,
+                interval="15m",
+                delete_raw=True,
+                adm1_code=settings.target_adm1,
+                actor_cameo=None,
+                raise_on_download_error=True,
             )
-            return success_count
-
-        return 0
+        )
+        if not events:
+            return 0
+        gkg = GkgHarvester(raw_dir=raw_dir).run(
+            start_date=target_datetime,
+            end_date=target_datetime,
+            interval="15m",
+            delete_raw=True,
+            adm1_code=settings.target_adm1,
+            raise_on_download_error=True,
+        )
+        try:
+            return upload_to_elasticsearch(
+                es_client,
+                iter_joined_records(events, gkg, target_datetime),
+                index_name=settings.es_index,
+            )
+        finally:
+            gkg.close()

@@ -10,46 +10,44 @@ from mastodon_retrieve.streamer import MastodonStreamer
 setup_logging()
 
 
-def mastodon_au():
-    """
-    Stream data from mastodon.au site
-    """
-    mast_settings = read_from_secret("mastodon-au", MastodonSettings)
+def _stream_instance(secret: str, tags: list[str] | None = None):
+    """Keep the queue connection inside the event loop that owns it."""
+    mast_settings = read_from_secret(secret, MastodonSettings)
     vk_settings = read_from_secret("valkey-cfg", ValkeySettings)
-    vk_client = Valkey(host=vk_settings.host, port=vk_settings.port)
-    mastodon_client = MastodonStreamer(settings=mast_settings)
+    streamer = MastodonStreamer(settings=mast_settings)
 
-    total = asyncio.run(
-        mastodon_client.stream_to_vk(vk_client, max_time=30.0, local=True)
-    )
-    return {"total_added": total}
+    async def run():
+        async with Valkey(host=vk_settings.host, port=vk_settings.port) as vk:
+            if not tags:
+                return await streamer.stream_to_vk(
+                    vk, max_time=30.0, local=True
+                )
+            # TaskGroup cancels and awaits sibling streams before closing vk
+            # when one of the upstream subscriptions fails.
+            async with asyncio.TaskGroup() as group:
+                tasks = [
+                    group.create_task(
+                        streamer.stream_to_vk(
+                            vk, hashtag=tag, max_time=30.0, local=False
+                        )
+                    )
+                    for tag in tags
+                ]
+            return sum(task.result() for task in tasks)
+
+    return {"total_added": asyncio.run(run())}
+
+
+def mastodon_au():
+    return _stream_instance("mastodon-au")
 
 
 def au_social():
-    """
-    Stream data from au.social site
-    """
-    mast_settings = read_from_secret("mastodon-au-social", MastodonSettings)
-    vk_settings = read_from_secret("valkey-cfg", ValkeySettings)
-    vk_client = Valkey(host=vk_settings.host, port=vk_settings.port)
-    mastodon_client = MastodonStreamer(settings=mast_settings)
-
-    total = asyncio.run(
-        mastodon_client.stream_to_vk(vk_client, max_time=30.0, local=True)
-    )
-    return {"total_added": total}
+    return _stream_instance("mastodon-au-social")
 
 
 def mastodon_social():
-    """
-    Stream from the mastodon.social main server but only for specified hashtags
-    :return:
-    """
-    mast_settings = read_from_secret("mastodon-social", MastodonSettings)
-    vk_settings = read_from_secret("valkey-cfg", ValkeySettings)
-    vk_client = Valkey(host=vk_settings.host, port=vk_settings.port)
-    mastodon_client = MastodonStreamer(settings=mast_settings)
-
+    """Stream Australia-related hashtags from mastodon.social."""
     tags = [
         "australia",
         "victoria",
@@ -65,16 +63,4 @@ def mastodon_social():
         "straya",
     ]
 
-    async def gather_tag_posts() -> list[int]:
-        totals = await asyncio.gather(
-            *(
-                mastodon_client.stream_to_vk(
-                    vk_client, hashtag=tag, max_time=30.0, local=False
-                )
-                for tag in tags
-            )
-        )
-        return totals
-
-    counts = asyncio.run(gather_tag_posts())
-    return {"total_added": sum(counts)}
+    return _stream_instance("mastodon-social", tags)

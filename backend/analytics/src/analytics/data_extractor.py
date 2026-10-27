@@ -1,17 +1,11 @@
 import logging
 
-import nltk
 from nltk import FreqDist
 from nltk.corpus import stopwords
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 from nltk.tokenize import word_tokenize
 from pydantic import BaseModel
 from textblob import TextBlob
-
-nltk.download("vader_lexicon", quiet=True)
-nltk.download("stopwords", quiet=True)
-nltk.download("punkt", quiet=True)
-nltk.download("punkt_tab", quiet=True)
 
 log = logging.getLogger(__name__)
 

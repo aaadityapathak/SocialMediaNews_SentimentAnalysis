@@ -8,6 +8,8 @@ from datetime import datetime, UTC
 
 from create_elasticsearch_idx import create_indices_from_file, create_indices
 
+pytestmark = pytest.mark.integration
+
 
 class IdxSubModel1(BaseModel):
     """

@@ -1,5 +1,21 @@
 version: 3
 tasks:
+  setup-test:
+    desc: Install locked dependencies and NLP resources for offline tests
+    cmds:
+      - uv sync --locked --package comp90024-team-23 --package harvesters --package processing --package api --package analytics --no-default-groups --group test --extra census
+      - uv run --no-sync python -m nltk.downloader -d nltk_data vader_lexicon stopwords punkt punkt_tab
+
+  test:
+    desc: Run every component's tests in isolated Python processes
+    cmd: uv run --no-sync python scripts/test_all.py {{.CLI_ARGS}}
+
+  check-python:
+    desc: Check syntax and critical static errors across all Python components
+    cmds:
+      - uv run --no-sync python -m compileall -q backend frontend scripts test
+      - uv run --no-sync ruff check --select E9,F63,F7,F82 backend frontend scripts test conftest.py test_support.py
+
   format:
     desc: Format the code in the repo
     cmds:
@@ -108,6 +124,8 @@ tasks:
     cmd: |
       uv export \
           --package {{.PACKAGE | default "harvesters"}} \
+          --no-dev \
+          --no-emit-workspace \
           --format requirements.txt  \
           --no-hashes \
           --no-annotate \

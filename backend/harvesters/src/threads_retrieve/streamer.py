@@ -1,27 +1,23 @@
-import urllib3
-import time
-import random
-import logging
-import warnings
-import threading
+"""Shared bounded Threads orchestration for local and Fission entry points."""
+
 import concurrent.futures
+import logging
+import threading
+import time
+from dataclasses import dataclass
+
 from elasticsearch import Elasticsearch
-from elasticsearch.exceptions import ElasticsearchWarning
-from .settings import ThreadsStreamSettings
+
 from . import scrape_keyword
 from .schemas import make_document, upload_to_elasticsearch
+from .settings import ThreadsStreamSettings
 
-warnings.simplefilter("ignore", ElasticsearchWarning)
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-logger = logging.getLogger("threads_streamer")
+logger = logging.getLogger(__name__)
 
 
 def get_es_client(settings: ThreadsStreamSettings) -> Elasticsearch:
     if not settings.elastic_api_key:
-        logger.error("ELASTIC_API_KEY is missing from your .env file!")
-        raise ValueError("Missing API Key")
-
+        raise ValueError("Missing ELASTIC_API_KEY")
     return Elasticsearch(
         settings.elastic_host,
         api_key=settings.elastic_api_key,
@@ -29,102 +25,123 @@ def get_es_client(settings: ThreadsStreamSettings) -> Elasticsearch:
     )
 
 
-def process_keyword(
-    keyword: str,
-    stop_event: threading.Event,
-    doc_list: list,
-    list_lock: threading.Lock,
-):
-    """Parallel worker function that checks for stop signals."""
-    # If another thread already got blocked, don't even start this search
-    if stop_event.is_set():
-        return
+def _collect(keyword, stop_event, settings, deadline):
+    if stop_event.is_set() or time.monotonic() >= deadline:
+        return []
+    posts, blocked = scrape_keyword(
+        keyword,
+        stop_event=stop_event,
+        deadline=deadline,
+        timeout_seconds=settings.keyword_timeout_seconds,
+        max_scrolls=settings.max_scrolls,
+    )
+    if blocked:
+        stop_event.set()
+    return [
+        make_document(post, keyword)
+        for post in posts
+        if post.get("text") and post.get("id")
+    ]
 
-    try:
-        # Stagger browser launches slightly to avoid Playwright crashes
-        time.sleep(random.uniform(0.5, 3.0))
 
-        # Double check stop event after sleep
-        if stop_event.is_set():
-            return
+def process_keyword(keyword, stop_event, doc_list, list_lock):
+    """Compatibility worker for existing callers."""
+    settings = ThreadsStreamSettings()
+    documents = _collect(
+        keyword,
+        stop_event,
+        settings,
+        time.monotonic() + settings.keyword_timeout_seconds,
+    )
+    with list_lock:
+        doc_list.extend(documents)
 
-        logger.info(f"Searching: {keyword}")
-        posts, is_blocked = scrape_keyword(keyword)
 
-        # EMERGENCY STOP TRIGGER
-        if is_blocked:
-            logger.warning(
-                f"Block detected on '{keyword}'. Signaling all threads to abort..."
+@dataclass(frozen=True)
+class HarvestResult:
+    total_added: int
+    interrupted: bool
+
+
+def harvest_keywords(es_client, settings, keywords=None) -> HarvestResult:
+    """Keep at most ``max_workers`` keyword tasks in flight.
+
+    Each task still returns a page's parsed payload. Completed payloads are
+    released after upload; only post IDs are retained for cross-keyword dedup.
+    """
+    keywords = list(
+        dict.fromkeys(settings.keywords if keywords is None else keywords)
+    )
+    stop_event = threading.Event()
+    deadline = time.monotonic() + settings.harvest_timeout_seconds
+    seen = set()
+    total = 0
+    errors = []
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=settings.max_workers
+    ) as executor:
+        keyword_iter = iter(keywords)
+        pending = set()
+
+        def refill():
+            # Keep at most max_workers futures in flight. Submitting all
+            # keywords at once also retains every completed payload in the
+            # original future list, even after its documents were indexed.
+            while (
+                len(pending) < settings.max_workers and not stop_event.is_set()
+            ):
+                if time.monotonic() >= deadline:
+                    stop_event.set()
+                    break
+                keyword = next(keyword_iter, None)
+                if keyword is None:
+                    break
+                pending.add(
+                    executor.submit(
+                        _collect, keyword, stop_event, settings, deadline
+                    )
+                )
+
+        refill()
+        while pending:
+            completed, pending = concurrent.futures.wait(
+                pending, return_when=concurrent.futures.FIRST_COMPLETED
             )
+            for future in completed:
+                try:
+                    documents = future.result()
+                    unique = []
+                    for document in documents:
+                        post_id = str(document["post_id"])
+                        if post_id not in seen:
+                            seen.add(post_id)
+                            unique.append(document)
+                    if unique:
+                        total += upload_to_elasticsearch(
+                            es_client, unique, settings.es_index
+                        )
+                except Exception as exc:  # noqa: BLE001 - aggregate worker/upload failures
+                    stop_event.set()
+                    errors.append(exc)
+            # Drop completed futures before scheduling their replacements.
+            completed.clear()
+            refill()
+        if time.monotonic() >= deadline:
             stop_event.set()
-            return
-
-        if not posts:
-            logger.info(f"No posts found for '{keyword}'")
-            return
-
-        # Map and filter documents
-        docs = [make_document(p, keyword) for p in posts]
-        valid_docs = [d for d in docs if d.get("text") and d.get("post_id")]
-
-        # Thread-safe append to the master list
-        if valid_docs:
-            with list_lock:
-                doc_list.extend(valid_docs)
-                logger.info(f"Queued {len(valid_docs)} posts for '{keyword}'.")
-
-    except Exception as e:
-        logger.error(f"Error processing '{keyword}': {str(e)}")
+    if errors:
+        raise RuntimeError(
+            f"Threads harvest failed in {len(errors)} workers or uploads"
+        ) from errors[0]
+    return HarvestResult(total, stop_event.is_set())
 
 
 def run_stream():
     settings = ThreadsStreamSettings()
-    es_client = get_es_client(settings)
-
-    # Shared thread variables
-    all_documents = []
-    list_lock = threading.Lock()
-    stop_event = threading.Event()
-
-    # Keep workers low (3-5) to give Stealth a fighting chance
-    MAX_WORKERS = 4
-
+    with get_es_client(settings) as client:
+        result = harvest_keywords(client, settings)
     logger.info(
-        f"Starting PARALLEL harvest for {len(settings.keywords)} keywords with {MAX_WORKERS} workers..."
+        "Indexed %s Threads posts; interrupted=%s",
+        result.total_added,
+        result.interrupted,
     )
-
-    # Run in parallel
-    with concurrent.futures.ThreadPoolExecutor(
-        max_workers=MAX_WORKERS
-    ) as executor:
-        futures = [
-            executor.submit(
-                process_keyword, keyword, stop_event, all_documents, list_lock
-            )
-            for keyword in settings.keywords
-        ]
-        # Wait for all submitted tasks to either finish or abort
-        concurrent.futures.wait(futures)
-
-    # ---------------------------------------------------------
-    # FINAL STEP: Push whatever we successfully gathered to ES
-    # ---------------------------------------------------------
-    if stop_event.is_set():
-        logger.warning("Harvest was interrupted by a Meta IP block.")
-
-    if all_documents:
-        logger.info(
-            f"Bulk uploading {len(all_documents)} salvaged documents to Elasticsearch..."
-        )
-        success = upload_to_elasticsearch(
-            es_client, all_documents, index_name=settings.es_index
-        )
-        logger.info(
-            f"Successfully indexed {success} out of {len(all_documents)} posts!"
-        )
-    else:
-        logger.warning(
-            "No valid posts were gathered before the block. Nothing to upload."
-        )
-
-    logger.info("Job Exited.")
+    return result

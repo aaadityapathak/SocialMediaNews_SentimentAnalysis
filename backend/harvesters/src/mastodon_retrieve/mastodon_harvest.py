@@ -1,6 +1,6 @@
 import logging
 from mastodon import Mastodon
-from datetime import datetime
+from datetime import UTC, datetime
 from dataclasses import dataclass
 from typing import Iterator, Literal
 from mastodon.return_types import Status
@@ -56,6 +56,16 @@ class MastodonHarvester(BaseHarvester[Status]):
         """
         return self.__client
 
+    def close(self) -> None:
+        """Release the reusable HTTP session owned by this harvester."""
+        self.client.session.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
     def run(
         self,
         start_date: datetime,
@@ -71,7 +81,15 @@ class MastodonHarvester(BaseHarvester[Status]):
         :param kwargs:
         :return:
         """
+        if start_date.tzinfo is None:
+            start_date = start_date.replace(tzinfo=UTC)
+        if end_date.tzinfo is None:
+            end_date = end_date.replace(tzinfo=UTC)
+        if start_date >= end_date:
+            raise ValueError("start_date must be earlier than end_date")
         params = params or MastodonSearchParams()
+        if params.limit is not None and params.limit <= 0:
+            return
         if params.hashtag:
             method = self.client.timeline_hashtag
             search_params = {
@@ -79,6 +97,7 @@ class MastodonHarvester(BaseHarvester[Status]):
                 "min_id": start_date,
                 "max_id": end_date,
                 "local": params.local,
+                "limit": 40,
             }
         else:
             method = self.client.timeline
@@ -87,29 +106,38 @@ class MastodonHarvester(BaseHarvester[Status]):
                 "min_id": start_date,
                 "max_id": end_date,
                 "local": params.local,
+                "limit": 40,
             }
 
         results = method(**search_params)
         total = 0
-        while results is not None and len(results) > 0:
+        previous_ids: set[str] = set()
+        previous_oldest: int | None = None
+        while results:
+            # Timeline pages are ordered by descending creation IDs. Stop if a
+            # buggy/repeated cursor fails to move backwards, without retaining
+            # the entire history in memory.
+            oldest = min(int(status.id) for status in results)
+            if previous_oldest is not None and oldest >= previous_oldest:
+                logger.warning("Mastodon pagination made no progress")
+                return
+            page_ids = set()
             for status in results:
-                total += 1
-                if params.limit and total > params.limit:
-                    logger.warning(
-                        "Reached maximum number of posts (%d)!", params.limit
-                    )
+                ident = str(status.id)
+                if ident in previous_ids or ident in page_ids:
+                    continue
+                page_ids.add(ident)
+                created = status.created_at
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=UTC)
+                if created < start_date:
                     return
-
-                # Sanity check since timestamp checks on Mastodon are only approximate
-                effective_time = status.edited_at or status.created_at
-                if effective_time < start_date:
-                    logger.info(
-                        "Reached status out-of-bounds (%s < %s) Stopping.",
-                        effective_time.isoformat(),
-                        start_date.isoformat(),
-                    )
-                    return
-
+                if created > end_date:
+                    continue
                 yield status
-
+                total += 1
+                if params.limit is not None and total >= params.limit:
+                    return
+            previous_ids = page_ids
+            previous_oldest = oldest
             results = self.client.fetch_next(results)

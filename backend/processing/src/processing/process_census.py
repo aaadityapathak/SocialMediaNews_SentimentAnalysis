@@ -1,5 +1,7 @@
 import logging
+from functools import lru_cache
 from pathlib import Path
+
 from shapely.geometry import mapping
 
 log = logging.getLogger(__name__)
@@ -48,12 +50,30 @@ def _last_field(columns: list[str], prefix: str) -> str | None:
 def _int(val) -> int:
     try:
         return int(float(val)) if val is not None else 0
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return 0
 
 
 def _doc_id(year: int, zone_type: str, zone_code: str) -> str:
     return f"{year}_{zone_type}_{zone_code}"
+
+
+@lru_cache(maxsize=32)
+def _dataset_fields(columns: tuple[str, ...], zone_type: str):
+    """Resolve the wide ABS column layout once per file, not once per row."""
+    if zone_type == "lga":
+        prefixes, total = LGA_MODE_PREFIXES, LGA_TOTAL_PREFIX
+    elif zone_type == "sa2":
+        prefixes, total = SA2_MODE_PREFIXES, SA2_TOTAL_PREFIX
+    else:
+        raise ValueError(f"Unsupported census zone type: {zone_type}")
+    return (
+        {
+            mode: _last_field(columns, prefix)
+            for mode, prefix in prefixes.items()
+        },
+        _last_field(columns, total),
+    )
 
 
 def detect_dataset(shp_path: Path) -> tuple[str, int] | None:
@@ -68,24 +88,19 @@ def detect_dataset(shp_path: Path) -> tuple[str, int] | None:
 
 def extract_record(row, columns: list[str], zone_type: str, year: int) -> dict:
     if zone_type == "lga":
-        mode_prefixes = LGA_MODE_PREFIXES
-        total_prefix = LGA_TOTAL_PREFIX
         zone_code = str(row.get("lga_code22") or row.get("lga_code_2", ""))
         zone_name = str(row.get("lga_name22", ""))
         state = str(row.get("ste_name21", ""))
     else:
-        mode_prefixes = SA2_MODE_PREFIXES
-        total_prefix = SA2_TOTAL_PREFIX
         zone_code = str(row.get("sa2_main16", ""))
         zone_name = str(row.get("sa2_name16", ""))
         state = str(row.get("ste_name16", ""))
 
-    modes = {}
-    for mode, prefix in mode_prefixes.items():
-        field = _last_field(columns, prefix)
-        modes[mode] = _int(row.get(field)) if field else 0
-
-    total_field = _last_field(columns, total_prefix)
+    fields, total_field = _dataset_fields(tuple(columns), zone_type)
+    modes = {
+        mode: _int(row.get(field)) if field else 0
+        for mode, field in fields.items()
+    }
     modes["total"] = (
         _int(row.get(total_field)) if total_field else sum(modes.values())
     )

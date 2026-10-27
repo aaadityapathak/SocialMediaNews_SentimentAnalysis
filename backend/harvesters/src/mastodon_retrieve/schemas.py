@@ -56,7 +56,7 @@ class Status(BaseModel):
     id: str
     visibility: Literal["public", "unlisted", "private", "direct"]
     uri: str
-    url: str
+    url: str | None = None
     account: Account
     # application: Application | None = Field(default=None)
     created_at: datetime

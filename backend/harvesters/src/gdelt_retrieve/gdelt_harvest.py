@@ -3,9 +3,10 @@ from __future__ import annotations
 import logging
 import sys
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Iterator, TypeVar, Generic
+from typing import TypeVar
 
 DataPoint = TypeVar("DataPoint")
 
@@ -129,7 +130,7 @@ class EventRecord:
     extra: list[str] = field(default_factory=list, repr=False)
 
     @classmethod
-    def from_row(cls, row: list[str]) -> "EventRecord":
+    def from_row(cls, row: list[str]) -> EventRecord:
         r = row + [""] * max(0, 58 - len(row))
         return cls(
             GlobalEventID=r[0],
@@ -271,7 +272,7 @@ class GkgRecord:
     extra: list[str] = field(default_factory=list, repr=False)
 
     @classmethod
-    def from_row(cls, row: list[str]) -> "GkgRecord":
+    def from_row(cls, row: list[str]) -> GkgRecord:
         r = row + [""] * max(0, 11 - len(row))
         return cls(
             DATE=r[0],
@@ -312,7 +313,7 @@ class GkgRecord:
         ] + self.extra
 
 
-class GdeltHavestor(ABC, Generic[DataPoint]):
+class GdeltHavestor[DataPoint](ABC):
     """Abstract base class establishing the contract for all data harvesters."""
 
     def __init__(self, raw_dir: str | None = None) -> None:

@@ -37,15 +37,16 @@ def gather_mastodon_records(
     :param save_to: Where to save the output file
     :return:
     """
-    harvester = MastodonHarvester()
-
     if hashtags:
         hashtags = hashtags.split(";")
     else:
         hashtags = [None]
     seen = set()
 
-    with open(save_to, "a") as f:
+    with (
+        MastodonHarvester() as harvester,
+        open(save_to, "a", encoding="utf-8") as f,
+    ):
         for hashtag in hashtags:
             params = MastodonSearchParams(
                 hashtag=hashtag, local=not include_remote, timeline="public"
@@ -58,4 +59,5 @@ def gather_mastodon_records(
                 f.write(f"{stat.to_json(pretty=False)}\n")
 
 
-fire.Fire({"gather": gather_mastodon_records})
+if __name__ == "__main__":
+    fire.Fire({"gather": gather_mastodon_records})

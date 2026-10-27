@@ -1,15 +1,18 @@
-import re
-import time
+"""Mastodon HTTP streaming, event validation and queue delivery."""
+
+import asyncio
 import json
-import httpx
 import logging
-from functools import partial
-from typing import AsyncIterator
-from valkey.asyncio import Valkey
-from pydantic import ValidationError
+from contextlib import aclosing
 from dataclasses import dataclass, field
+from typing import AsyncIterator
+
+import httpx
+from pydantic import ValidationError
+from valkey.asyncio import Valkey
 
 from . import schemas
+from .events import iter_events
 from .settings import MastodonSettings
 
 logger = logging.getLogger(__name__)
@@ -17,68 +20,23 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class MastodonStreamer:
-    """
-    Streamer to get live data from Mastodon
-    """
-
     settings: MastodonSettings = field(default_factory=MastodonSettings)
     status_events: set[schemas.EventType] = field(
-        default_factory=partial(set, (schemas.EventType.update,))
+        default_factory=lambda: {schemas.EventType.update}
     )
 
-    @staticmethod
-    def __wrap(doc: schemas.Status) -> dict:
-        """
-        Wrap document into a dictionary to be sent to the Valkey Queue for
-        processing
-        :param doc:
-        :return:
-        """
-        return {"source": "mastodon", "data": doc.model_dump(mode="json")}
-
     async def statuses_from_event_stream(
-        self,
-        event_stream: AsyncIterator[str],
+        self, event_stream: AsyncIterator[str]
     ) -> AsyncIterator[schemas.Status | None]:
-        """
-        Receive events from stream and yield the statuses from "update"-type events (posts).
-        :param event_stream: Stream yielding lines from the Mastodon Server feed
-        :return:
-        """
-        expecting_data = False
-        async for line in event_stream:
-            if line.strip() == ":thump":
-                logger.debug("Ping signal from server")
+        async for event in iter_events(event_stream):
+            if event is None or event[0] not in self.status_events:
                 yield None
                 continue
-
-            if expecting_data:
-                if not line.startswith("data:"):
-                    logger.error("Expected a data line but received none!")
-                    expecting_data = False
-                    continue
-
-                try:
-                    status = schemas.Status.model_validate_json(
-                        line[5:].strip()
-                    )
-                    yield status
-                except ValidationError as e:
-                    logger.error(
-                        "Invalid data received - unable to parse: %s", e
-                    )
-
-                expecting_data = False
-                continue
-
-            event_pat = re.search(r"^event:\s+(\w+(?:\.\w+)?)", line)
-            if event_pat and event_pat.group(1) in self.status_events:
-                logger.debug("Update event - expecting status data")
-                expecting_data = True
-            else:
+            try:
+                yield schemas.Status.model_validate_json(event[1])
+            except ValidationError:
+                logger.warning("Ignoring malformed Mastodon status event")
                 yield None
-
-        logger.info("Streaming done")
 
     async def __stream_elements(
         self,
@@ -86,102 +44,89 @@ class MastodonStreamer:
         headers: dict[str, str],
         params: dict[str, str | int | bool] | None = None,
     ) -> AsyncIterator[schemas.Status | None]:
-        """
-        Stream statuses from the Mastodon feed
-        :param headers:
-        :param params:
-        :return:
-        """
-        url = f"{self.settings.base_url}/{path}"
-        redirected = False
-        async with httpx.AsyncClient(headers=headers, timeout=30) as client:
-            # Check for redirection
-            async with client.stream(
-                "GET", url, headers=headers, params=params
-            ) as stream:
-                logger.info(
-                    "Connection established (%s)[%d]", url, stream.status_code
-                )
-                # Some servers redirect to an alternate URL for streaming
-                if stream.status_code // 100 == 3:
-                    logger.info(
-                        "Redirected to: %s", stream.headers.get("Location")
+        url = f"{self.settings.base_url.rstrip('/')}/{path}"
+        async with httpx.AsyncClient(
+            headers=headers,
+            timeout=self.settings.timeout_seconds,
+            follow_redirects=True,
+        ) as client:
+            for attempt in range(self.settings.max_retries + 1):
+                try:
+                    async with client.stream(
+                        "GET", url, params=params
+                    ) as stream:
+                        stream.raise_for_status()
+                        async for status in self.statuses_from_event_stream(
+                            stream.aiter_lines()
+                        ):
+                            yield status
+                    return
+                except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+                    if isinstance(exc, httpx.HTTPStatusError):
+                        if exc.response.status_code not in {
+                            429,
+                            500,
+                            502,
+                            503,
+                            504,
+                        }:
+                            raise
+                    if attempt >= self.settings.max_retries:
+                        raise
+                    delay = min(
+                        30.0, self.settings.retry_backoff_seconds * 2**attempt
                     )
-                    url = stream.headers.get("Location")
-                    redirected = True
+                    logger.warning(
+                        "Mastodon stream disconnected; retry %d", attempt + 1
+                    )
+                    await asyncio.sleep(delay)
 
-                else:
-                    async for status in self.statuses_from_event_stream(
-                        stream.aiter_lines()
-                    ):
-                        yield status
+    def _headers(self) -> dict[str, str]:
+        headers = {"User-Agent": self.settings.user_agent}
+        if self.settings.auth_token:
+            headers["Authorization"] = f"Bearer {self.settings.auth_token}"
+        return headers
 
-            if not redirected:
-                return
-
-            # In case redirected
-            async with client.stream(
-                "GET", url, timeout=60, params=params
-            ) as stream:
-                async for status in self.statuses_from_event_stream(
-                    stream.aiter_lines()
-                ):
-                    yield status
+    async def _limited_stream(
+        self, path: str, params: dict, max_elements: int | None
+    ) -> AsyncIterator[schemas.Status | None]:
+        if max_elements is not None and max_elements <= 0:
+            return
+        count = 0
+        async with aclosing(
+            self.__stream_elements(path, self._headers(), params)
+        ) as events:
+            async for item in events:
+                if item is not None:
+                    count += 1
+                yield item
+                if max_elements is not None and count >= max_elements:
+                    return
 
     async def stream_public_timeline(
         self, max_elements: int | None = None, local: bool = False
     ) -> AsyncIterator[schemas.Status | None]:
-        """
-        Stream events from the public timeline of the Mastodon Server
-        :return:
-        """
-        headers = {
-            "User-Agent": self.settings.user_agent,
-            "Authorization": f"Bearer {self.settings.auth_token}",
-        }
-        params = {}
         path = "api/v1/streaming/public"
         if local:
-            path = f"{path}/local"
-        i = 0
-        async for item in self.__stream_elements(path, headers, params):
-            if item:
-                i += 1
-            yield item
-
-            if max_elements and i >= max_elements:
-                logger.info("Reached limit (%d) stopping stream")
-                break
-
-        logger.info("Streamed %d total items from %s", i, path)
+            path += "/local"
+        async with aclosing(
+            self._limited_stream(path, {}, max_elements)
+        ) as events:
+            async for item in events:
+                yield item
 
     async def stream_hashtag(
         self, hashtag: str, max_elements: int | None = None, local: bool = False
     ) -> AsyncIterator[schemas.Status | None]:
-        """
-        Stream statuses from the timeline of a given hashtag on the Mastodon server.
-        :param hashtag:
-        :param max_elements:
-        :param local:
-        :return:
-        """
-        headers = {
-            "User-Agent": self.settings.user_agent,
-            "Authorization": f"Bearer {self.settings.auth_token}",
-        }
-        params = {"local": local, "tag": hashtag.lstrip("#")}
         path = "api/v1/streaming/hashtag"
-        i = 0
-        async for item in self.__stream_elements(path, headers, params):
-            if item:
-                i += 1
-            yield item
-
-            if max_elements and i >= max_elements:
-                logger.info("Reached limit (%d) stopping stream")
-                break
-
-        logger.info("Streamed %d total items from %s [%s]", i, path, hashtag)
+        if local:
+            path += "/local"
+        params = {"tag": hashtag.lstrip("#")}
+        async with aclosing(
+            self._limited_stream(path, params, max_elements)
+        ) as events:
+            async for item in events:
+                yield item
 
     async def stream_to_vk(
         self,
@@ -191,39 +136,41 @@ class MastodonStreamer:
         hashtag: str | None = None,
         local: bool = True,
     ) -> int:
-        """
-        Stream to Valkey List. Stop after the specified amount of time (seconds).
-        :param vk:
-        :param vk_list:
-        :param max_time:
-        :param hashtag:
-        :param local:
-        :return:
-        """
-        start = time.time()
+        """Deliver statuses with a deadline that also interrupts idle reads."""
+        if max_time <= 0:
+            return 0
         total = 0
-        if hashtag:
-            async for doc in self.stream_hashtag(hashtag, local=local):
-                if doc:
-                    await vk.lpush(
-                        vk_list,
-                        json.dumps(self.__wrap(doc)),
-                    )
-                    total += 1
-
-                if (time.time() - start) > max_time:
-                    break
-        else:
-            async for doc in self.stream_public_timeline(local=local):
-                if doc:
-                    await vk.lpush(
-                        vk_list,
-                        json.dumps(self.__wrap(doc)),
-                    )
-                    logger.info("Pushed element")
-                    total += 1
-
-                if (time.time() - start) > max_time:
-                    break
-
+        publishing = False
+        stream = (
+            self.stream_hashtag(hashtag, local=local)
+            if hashtag
+            else self.stream_public_timeline(local=local)
+        )
+        deadline = asyncio.timeout(max_time)
+        try:
+            async with deadline:
+                async with aclosing(stream) as events:
+                    async for doc in events:
+                        if doc is None:
+                            continue
+                        publishing = True
+                        await vk.lpush(
+                            vk_list,
+                            json.dumps(
+                                {
+                                    "source": "mastodon",
+                                    "data": doc.model_dump(mode="json"),
+                                }
+                            ),
+                        )
+                        total += 1
+                        publishing = False
+        except TimeoutError as exc:
+            if not deadline.expired():
+                raise
+            if publishing:
+                raise TimeoutError(
+                    "Mastodon deadline expired during queue delivery; "
+                    "delivery is unconfirmed"
+                ) from exc
         return total

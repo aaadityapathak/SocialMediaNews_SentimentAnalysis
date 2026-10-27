@@ -16,7 +16,7 @@ def indices_definition() -> Path:
     Path to file with ElasticSearch test index definition
     :return:
     """
-    return Path(__file__).parents[3] / "mappings" / "test-indices.json"
+    return Path(__file__).parents[3] / "database" / "mappings" / "test-indices.json"
 
 
 @pytest.fixture()

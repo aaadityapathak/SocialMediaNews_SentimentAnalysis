@@ -1,4 +1,39 @@
-# COMP90024_team_23
+# Social Media and News Sentiment Analysis
+
+Version **0.2.0**. Ingestion adapters collect Bluesky, Mastodon, YouTube,
+GDELT, Threads, AEC election data, and ABS census travel data. See
+[CHANGELOG.md](CHANGELOG.md) for changes and migration notes.
+
+## Development and testing
+
+Use Python 3.13 and `uv`. Install the focused development environment from the
+repository root (the ML models and optional browser runtime are separate):
+
+```shell
+uv sync --locked --package comp90024-team-23 --package harvesters --package processing --package api --package analytics --no-default-groups --group test --extra census
+uv run --no-sync python -m nltk.downloader -d nltk_data vader_lexicon stopwords punkt punkt_tab
+uv run --no-sync python scripts/test_all.py
+```
+
+The runner executes application, harvester, processing, API, and ML test suites
+in separate processes. This preserves each Fission package's import root and
+avoids collisions between its `base`, `elastic`, and `settings` modules. It
+sets `NLTK_DATA` to the local `nltk_data` directory unless already configured.
+NLTK assets are installed explicitly; application imports do not download data.
+
+Use `--suite harvesters` to select a component, or pass pytest options such as
+`-k census`. `task setup-test`, `task test`, and `task check-python` provide the
+same workflow when Go-task is installed.
+
+Tests marked `integration` are skipped by default. To run them, install the ML
+environment/models and configure provider credentials and local Elasticsearch,
+then run `python scripts/test_all.py --integration` from the prepared environment.
+The live Elasticsearch tests create and delete dedicated test indices; use a
+test cluster. A green offline run does not verify provider availability, a
+real Chromium session, model accuracy, or a Kubernetes deployment.
+
+See [the ingestion guide](docs/ingestion.md) for architecture, configuration,
+backfills, batching, failure behavior, and deployment compatibility.
 
 ## Repository Structure
 The main components of this repository are structured in directories as follows:
@@ -8,7 +43,9 @@ The main components of this repository are structured in directories as follows:
 - `specs`: Fission specs for our components.
 - `infrastructure`: Terraform infrastructure definitions.
 - `database`: Various index definitions.
-- `test`: End to end unit tests. Backend components have unit tests in their respective repositories.
+- `test`: Application API and analytics regression tests.
+- `backend/*/tests`: Component unit tests and explicitly marked integration tests.
+- `scripts`: Repository tooling, including the full test runner.
 
 ## Infrastructure
 
@@ -51,7 +88,7 @@ If you want to build the ML Server Docker image, run `task build-image` from the
 Otherwise, you can just pull the image from the public Dockerhub registry at `dstilesr/t23-ml-server`. It is built for Linux and x86_64 architecture. With this you should be up and running with the backend!
 
 ## Frontend - Interface
-Once you have deployed the backend, you can run the frontend application to visualise the sentiment data. The application is implemented with [`streamlit`](https://streamlit.io/. To run it, you must first start port forwarding to the Fission router:
+Once you have deployed the backend, you can run the frontend application to visualise the sentiment data. The application is implemented with [`streamlit`](https://streamlit.io/). To run it, you must first start port forwarding to the Fission router:
 ```shell
 kubectl port-forward -n fission svc/router 9090:80
 ```
@@ -62,6 +99,8 @@ uv run streamlit run political-sentiment.py
 This should open a browser window where you can interact with the application and data display.
 
 ## Comment on Tests
-Many of the backend tests require live services, so ou may need provider credentials in order to run them. You will also need to port-forward to the following cluster services:
+Live integration tests require `--run-integration` in component pytest runs (or
+`--integration` in the repository runner), provider credentials, and configured
+test services. You may need to port-forward the following cluster services:
 - ElasticSearch
 - Valkey

@@ -4,17 +4,18 @@ Youtube retrieval test. Run this to fetch records from youtube. Run this script 
 
 import json
 import logging
-import fire
-
+from contextlib import closing
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from datetime import datetime, UTC, timedelta
-from valkey import Valkey
 
+import fire
 from base import setup_logging
+from valkey import Valkey
 from valkey_settings import ValkeySettings
-from .youtube import YoutubeHarvester
-from .streamer import YoutubeStreamer
+
 from .defaults import SEARCH_QUERIES
+from .streamer import YoutubeStreamer
+from .youtube import YoutubeHarvester
 
 setup_logging(logging.DEBUG)
 log = logging.getLogger(__name__)
@@ -40,9 +41,11 @@ def gather(
     queries = json.loads(query) if query else SEARCH_QUERIES
     harvester = YoutubeHarvester()
 
-    with open(save_to, "w") as f:
-        for video in harvester.run(start_time, end_time, queries=queries):
-            f.write(json.dumps(video) + "\n")
+    with (
+        open(save_to, "w", encoding="utf-8") as f,
+        closing(harvester.run(start_time, end_time, queries=queries)) as videos,
+    ):
+        f.writelines(json.dumps(video) + "\n" for video in videos)
 
     log.info("Saved %s records to %s", "youtube", save_to)
 
@@ -53,9 +56,8 @@ def stream(
     query: str | None = None,
 ):
     """
-    Fetch YouTube records and index them directly into ElasticSearch across
-    three indices: youtube-videos-idx, youtube-comments-idx, youtube-replies-idx.
-    Requires ELASTIC_HOST and ELASTIC_API_KEY in the environment.
+    Fetch YouTube records and enqueue them in Valkey for processing.
+    Requires YOUTUBE_API_KEY and the Valkey connection settings.
     :param start_time: Start of the harvest window (ISO datetime)
     :param end_time: End of the harvest window (ISO datetime)
     :param query: JSON string mapping topic to list of search queries
@@ -65,8 +67,14 @@ def stream(
     vk = Valkey(host=vk_settings.host, port=vk_settings.port)
 
     streamer = YoutubeStreamer()
-    counts = streamer.harvest_to_vk(vk, start_time, end_time, queries=queries)
+    try:
+        counts = streamer.harvest_to_vk(
+            vk, start_time, end_time, queries=queries
+        )
+    finally:
+        vk.close()
     log.info("Sending to Valkey Queue: %s", counts)
 
 
-fire.Fire({"gather": gather, "stream": stream})
+if __name__ == "__main__":
+    fire.Fire({"gather": gather, "stream": stream})

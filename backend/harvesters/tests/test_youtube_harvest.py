@@ -3,6 +3,8 @@ from datetime import datetime, UTC
 
 from youtube import YoutubeHarvester
 
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture()
 def youtube_dates() -> tuple[datetime, datetime]:

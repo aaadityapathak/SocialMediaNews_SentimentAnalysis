@@ -177,7 +177,13 @@ class YouTubeProcessor(BaseProcessor):
 
     @staticmethod
     def _extract_youtube_created_at(doc: dict):
-        for key in ("published_at", "publishedAt", "created_at", "createdAt"):
+        for key in (
+            "published_at",
+            "publishedAt",
+            "published",
+            "created_at",
+            "createdAt",
+        ):
             if doc.get(key):
                 return doc.get(key)
 

@@ -1,7 +1,11 @@
+import hashlib
 import logging
-from typing import Iterator, Dict, Any
-from elasticsearch import Elasticsearch, helpers
+import math
+from collections.abc import Iterable, Iterator
+from typing import Any
+
 from elastic.settings import ESSettings
+from elasticsearch import Elasticsearch, helpers
 
 logger = logging.getLogger(__name__)
 
@@ -61,8 +65,8 @@ INT_FIELDS = [
 
 
 def generate_actions_from_memory(
-    rows: list[Dict[str, Any]], index_name: str
-) -> Iterator[Dict[str, Any]]:
+    rows: Iterable[dict[str, Any]], index_name: str
+) -> Iterator[dict[str, Any]]:
     for row in rows:
         sanitized_row = {}
 
@@ -72,37 +76,32 @@ def generate_actions_from_memory(
                 sanitized_row[key] = None
             elif key in FLOAT_FIELDS:
                 try:
-                    sanitized_row[key] = float(value)
-                except ValueError:
+                    number = float(value)
+                    sanitized_row[key] = (
+                        number if math.isfinite(number) else None
+                    )
+                except (ValueError, TypeError, OverflowError):
                     sanitized_row[key] = None
             elif key in INT_FIELDS:
                 try:
                     sanitized_row[key] = int(value)
-                except ValueError:
+                except (ValueError, TypeError, OverflowError):
                     sanitized_row[key] = None
             else:
                 sanitized_row[key] = str(value).strip()
 
-        # Extract & Rename GKG Tone Values
-        if sanitized_row.get("GKG_TONE"):
-            tone_parts = sanitized_row["GKG_TONE"].split(",")
-            if len(tone_parts) >= 4:
+        # Parse tone components independently; a bad component must not lose
+        # valid siblings or emit non-finite values rejected by Elasticsearch.
+        tone = sanitized_row.pop("GKG_TONE", None)
+        if tone:
+            names = ("Score", "Positive", "Negative", "Polarity")
+            for name, value in zip(names, tone.split(",")):
                 try:
-                    sanitized_row["GKG_Tone_Score"] = (
-                        float(tone_parts[0]) if tone_parts[0] else None
-                    )
-                    sanitized_row["GKG_Tone_Positive"] = (
-                        float(tone_parts[1]) if tone_parts[1] else None
-                    )
-                    sanitized_row["GKG_Tone_Negative"] = (
-                        float(tone_parts[2]) if tone_parts[2] else None
-                    )
-                    sanitized_row["GKG_Tone_Polarity"] = (
-                        float(tone_parts[3]) if tone_parts[3] else None
-                    )
-                except ValueError:
-                    pass
-            del sanitized_row["GKG_TONE"]
+                    number = float(value)
+                    number = number if math.isfinite(number) else None
+                except (ValueError, TypeError):
+                    number = None
+                sanitized_row[f"GKG_Tone_{name}"] = number
 
         # Array Formatting (Listification)
         for arr_field in ["GKG_THEMES", "GKG_PERSONS", "GKG_ORGANIZATIONS"]:
@@ -114,84 +113,76 @@ def generate_actions_from_memory(
                 ]
 
         # Geo-spatial mapping
-        if sanitized_row.get("Actor1Geo_Lat") and sanitized_row.get(
-            "Actor1Geo_Long"
+        if (
+            sanitized_row.get("Actor1Geo_Lat") is not None
+            and sanitized_row.get("Actor1Geo_Long") is not None
         ):
             sanitized_row["Actor1Geo_Location"] = (
                 f"{sanitized_row['Actor1Geo_Lat']},{sanitized_row['Actor1Geo_Long']}"
             )
 
-        if sanitized_row.get("Actor2Geo_Lat") and sanitized_row.get(
-            "Actor2Geo_Long"
+        if (
+            sanitized_row.get("Actor2Geo_Lat") is not None
+            and sanitized_row.get("Actor2Geo_Long") is not None
         ):
             sanitized_row["Actor2Geo_Location"] = (
                 f"{sanitized_row['Actor2Geo_Lat']},{sanitized_row['Actor2Geo_Long']}"
             )
 
-        if sanitized_row.get("ActionGeo_Lat") and sanitized_row.get(
-            "ActionGeo_Long"
+        if (
+            sanitized_row.get("ActionGeo_Lat") is not None
+            and sanitized_row.get("ActionGeo_Long") is not None
         ):
             sanitized_row["ActionGeo_Location"] = (
                 f"{sanitized_row['ActionGeo_Lat']},{sanitized_row['ActionGeo_Long']}"
             )
 
+        document_id = f"{sanitized_row.get('GlobalEventID', 'UKN')}_{sanitized_row.get('SourceURL', 'UKN')}"
+        if len(document_id.encode("utf-8")) > 512:
+            document_id = hashlib.sha256(
+                document_id.encode("utf-8")
+            ).hexdigest()
         yield {
             "_index": index_name,
-            "_id": f"{sanitized_row.get('GlobalEventID', 'UKN')}_{sanitized_row.get('SourceURL', 'UKN')}",
+            "_id": document_id,
             "_source": sanitized_row,
         }
 
 
 def upload_to_elasticsearch_local(
-    rows: list[Dict[str, Any]], index_name: str = "gdelt-index"
+    rows: Iterable[dict[str, Any]], index_name: str = "gdelt-index"
 ):
     settings = ESSettings()
-    client = Elasticsearch(
+    with Elasticsearch(
         settings.host,
         api_key=settings.api_key,
         verify_certs=False,
-    )
-
-    logger.info(
-        f"Pushing {len(rows)} cleaned documents to ES Index: '{index_name}'"
-    )
-    success, failed = helpers.bulk(
-        client,
-        generate_actions_from_memory(rows, index_name),
-        chunk_size=2000,
-        raise_on_error=False,
-    )
-
-    logger.info(
-        f"Upload complete. Success: {success}, Failed: {len(failed) if isinstance(failed, list) else failed}"
-    )
-    if failed:
-        logger.warning(f"Failed Sample: {failed[:2]}")
-
-    return success
+    ) as client:
+        return upload_to_elasticsearch(client, rows, index_name)
 
 
 def upload_to_elasticsearch(
     client: Elasticsearch,
-    rows: list[Dict[str, Any]],
+    rows: Iterable[dict[str, Any]],
     index_name: str = "gdelt-index",
 ) -> int:
-    logger.info(
-        f"Pushing {len(rows)} cleaned documents to ES Index: '{index_name}'"
-    )
-
-    success, failed = helpers.bulk(
+    # streaming_bulk bounds memory and retries rejected chunks. Surface final
+    # failures so schedulers do not advance past a partially ingested batch.
+    success = failures = 0
+    for ok, _ in helpers.streaming_bulk(
         client,
         generate_actions_from_memory(rows, index_name),
         chunk_size=500,
+        max_retries=3,
+        initial_backoff=1,
+        max_backoff=8,
         raise_on_error=False,
-    )
-
-    logger.info(
-        f"Upload complete. Success: {success}, Failed: {len(failed) if isinstance(failed, list) else failed}"
-    )
-
-    if failed:
-        logger.warning(f"Failed Sample: {failed[:2]}")
-
-    return success if success else 0
+    ):
+        if ok:
+            success += 1
+        else:
+            failures += 1
+    if failures:
+        raise RuntimeError(f"GDELT indexing failed for {failures} documents")
+    logger.info("Indexed %s GDELT documents", success)
+    return success

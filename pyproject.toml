@@ -1,7 +1,7 @@
 [project]
 name = "comp90024-team-23"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.2.0"
+description = "Multi-source social media and news ingestion, analysis, and APIs"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -11,7 +11,6 @@ dependencies = [
     "pydantic>=2.13.2",
     "pydantic-settings>=2.13.1",
     "pandas>=3.0.2",
-    "flask>=3.1.3",
     "nltk>=3.9.4",
     "textblob>=0.20.0",
     "tqdm>=4.67.3",
@@ -48,6 +47,11 @@ quote-style = "double"
 line-ending = "lf"
 
 [dependency-groups]
+test = [
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.3.0",
+    "ruff>=0.14.0",
+]
 dev = [
     "fire>=0.7.1",
     "pytest>=9.0.3",

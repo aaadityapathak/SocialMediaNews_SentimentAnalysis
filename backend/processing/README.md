@@ -1,5 +1,15 @@
 # Data Processing Functions
 
+Version **0.2.0**. Queue consumers are thin adapters around the `processing`
+package. `indexer.py` checks destination deduplication markers before costly
+normalization/inference and repairs partial deliveries independently.
+`census_io.py` owns shapefile iteration, batched queue delivery and bulk upserts;
+`process_census.py` owns record extraction.
+
+Install the optional `census` extra to read shapefiles. Run `python -m pytest`
+in this directory using the prepared workspace environment. See the
+[ingestion guide](../../docs/ingestion.md) for commands and delivery semantics.
+
 ## Overview
 This package contains Fission function for processing the raw data received from out social media sources. The function will be triggered when data is pushed to a given queue on Valkey (drop-in Redis replacement). It will do necessary transformations on the data and then load it to our ElasticSearch index for social media data. General workflow is as follows:
 

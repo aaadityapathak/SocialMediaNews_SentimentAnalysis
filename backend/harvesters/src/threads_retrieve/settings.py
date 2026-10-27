@@ -1,5 +1,3 @@
-import os
-from typing import List
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -12,9 +10,14 @@ class ThreadsStreamSettings(BaseSettings):
     )
     elastic_api_key: str = Field(default="", alias="ELASTIC_API_KEY")
     es_index: str = Field(default="threads_posts", alias="ES_INDEX")
+    max_workers: int = Field(default=3, ge=1, le=8)
+    max_scrolls: int = Field(default=8, ge=0, le=100)
+    keyword_timeout_seconds: float = Field(default=60, gt=0)
+    harvest_timeout_seconds: float = Field(default=90, gt=0)
+    fission_keyword_limit: int = Field(default=5, ge=1)
 
     # Expanded, specific Australian Keywords
-    keywords: List[str] = [
+    keywords: list[str] = [
         # Cities & States
         "Melbourne",
         "Sydney",

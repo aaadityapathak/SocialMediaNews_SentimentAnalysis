@@ -1,4 +1,13 @@
-# Hasrvesters
+# Harvesters
+
+Version **0.2.0**. Source adapters and reusable importers live in `src`; scripts
+are compatibility/CLI adapters and `tests` contains offline regressions plus
+explicit live integration checks. See the [ingestion guide](../../docs/ingestion.md)
+for all providers, batching controls, failure behavior, and backfill commands.
+
+From the prepared workspace environment, run `python -m pytest` in this
+directory. To run every service, use `python scripts/test_all.py` from the
+repository root. Live tests require `--run-integration`.
 
 
 ## Connecting to ElasticSearch

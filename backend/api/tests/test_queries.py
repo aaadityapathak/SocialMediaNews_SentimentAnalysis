@@ -1,5 +1,9 @@
 from datetime import datetime, UTC, timedelta
 
+import pytest
+
+pytestmark = pytest.mark.integration
+
 from api_schemas import TrendsRequest
 
 from time_series import (

@@ -1,16 +1,23 @@
 import json
-import time
 import logging
+import sys
+from contextlib import ExitStack, closing
+from pathlib import Path
+
 from pydantic import ValidationError
 from valkey import Valkey
 
+_src = Path(__file__).parents[1] / "src"
+if str(_src) not in sys.path:
+    sys.path.append(str(_src))
+
 from base import setup_logging
+from base.backfill import BackfillPublisher, mastodon_ids
 from elastic.settings import ESSettings
 from elasticsearch import Elasticsearch
 from mastodon_retrieve.schemas import Status
+from valkey_settings import ValkeySettings
 
-
-setup_logging()
 logger = logging.getLogger(__name__)
 
 tags = [
@@ -30,7 +37,7 @@ tags = [
     "aussie",
     "queensland",
     "tasmania",
-    "straya"
+    "straya",
 ]
 
 keywords = [
@@ -75,84 +82,113 @@ keywords = [
 
 
 def index_post(post: Status, vk: Valkey, es: Elasticsearch) -> bool:
-    """
-    Push post to the queue for indexing.
-    """
-    exists = es.exists(index="social-posts-index", id=f"mastodon-{post.uri}")
-    if bool(exists):
-        return False
-
+    """Compatibility wrapper; bulk uploads use one publisher across batches."""
     data = {"source": "mastodon", "data": post.model_dump(mode="json")}
-    vk.lpush("social-posts-index", json.dumps(data))
-    return True
+    return bool(
+        BackfillPublisher(vk, es, batch_size=1).publish(
+            [(mastodon_ids(post), data)]
+        )
+    )
+
+
+def _keep(post: Status) -> bool:
+    text = post.content.lower()
+    post_tags = {tag.name.lower() for tag in post.tags or []}
+    return (
+        "mastodon.au" in post.uri
+        or "au.social" in post.uri
+        or bool(post_tags.intersection(tags))
+        or any(keyword in text for keyword in keywords)
+        or any(tag in text for tag in tags)
+    )
+
+
+def _records(path: Path, counts: dict):
+    with path.open(encoding="utf-8") as source:
+        for line in source:
+            if not line.strip():
+                continue
+            counts["processed"] += 1
+            try:
+                item = json.loads(line)
+                item = item.get("doc", item)
+                if "created_at" not in item:
+                    item["created_at"] = item.pop("createdAt")
+                if (acct := item.get("account")) and "created_at" not in acct:
+                    acct["created_at"] = acct.pop("createdAt")
+                if "id" not in item:
+                    item["id"] = item["uri"]
+                post = Status.model_validate(item)
+            except (
+                ValidationError,
+                KeyError,
+                ValueError,
+                TypeError,
+                AttributeError,
+            ):
+                counts["failed"] += 1
+                logger.warning(
+                    "Skipping malformed record %d", counts["processed"]
+                )
+                continue
+            if not _keep(post):
+                counts["discarded"] += 1
+                continue
+            yield (
+                mastodon_ids(post),
+                {"source": "mastodon", "data": post.model_dump(mode="json")},
+            )
+
+
+def upload(
+    file: str,
+    batch_size: int = 250,
+    queue_limit: int = 15000,
+    queue_wait_seconds: float = 300,
+    ignore_existing: bool = False,
+):
+    """Stream a supplied Mastodon NDJSON file into the processing queue."""
+    path = Path(file)
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    setup_logging()
+    es_settings, vk_settings = ESSettings(), ValkeySettings()
+    counts = {"processed": 0, "indexed": 0, "discarded": 0, "failed": 0}
+    with ExitStack() as stack:
+        vk = stack.enter_context(
+            closing(
+                Valkey(
+                    host=vk_settings.host,
+                    port=vk_settings.port,
+                    socket_timeout=30,
+                    socket_connect_timeout=30,
+                )
+            )
+        )
+        es = stack.enter_context(
+            closing(
+                Elasticsearch(
+                    es_settings.host,
+                    api_key=es_settings.api_key,
+                    verify_certs=False,
+                    request_timeout=30,
+                )
+            )
+        )
+        records = stack.enter_context(closing(_records(path, counts)))
+        counts["indexed"] = BackfillPublisher(
+            vk,
+            es,
+            batch_size=batch_size,
+            queue_limit=queue_limit,
+            queue_wait_seconds=queue_wait_seconds,
+            ignore_existing=ignore_existing,
+        ).publish(records)
+    logger.info("Done loading data: %s", counts)
+    return counts
 
 
 if __name__ == "__main__":
-    es_settings = ESSettings()
-    vk = Valkey()
-    es = Elasticsearch(
-        es_settings.host,
-        api_key=es_settings.api_key,
-        verify_certs=False,
-        ssl_show_warn=False,
-    )
-    file = "/home/davidstiles/ClassWork/Semester20261/COMP90024/Assignment2/comp90024_team_23/backend/harvesters/data/mastodon-large.ndjson"
+    import fire
 
-    with open(file, "r", buffering=1) as f:
-        indexed = 0
-        discarded = 0
-        failed = 0
-        i = 0
-        logger.info("Starting...")
-        while line := f.readline():
-            i += 1
-            if i < 2:
-                continue
-            try:
-                item = json.loads(line)["doc"]
-                if "created_at" not in item:
-                    item["created_at"] = item.pop("createdAt")
-                if acct := item.get("account"):
-                    if "created_at" not in acct:
-                        acct["created_at"] = acct.pop("createdAt")
-                if "id" not in item:
-                    item["id"] = item["uri"]
-
-                stat = Status.model_validate(item)
-                txt_lower = stat.content.lower()
-                keep = (
-                    "mastodon.au" in stat.uri
-                    or "au.social" in stat.uri
-                    or (stat.tags and any(t in {tg.name for tg in stat.tags} for t in tags))
-                    or any(kw in txt_lower for kw in keywords)
-                    or any(tg in txt_lower for tg in tags)
-                )
-
-                if keep:
-                    if index_post(stat, vk, es):
-                        indexed += 1
-                        time.sleep(0.033)
-                else:
-                    discarded += 1
-
-                if i % 24000 == 0:
-                    logger.info(
-                        "Processed %d records so far. Indexed=%d, Discarded=%d, Failed=%d",
-                        i,
-                        indexed,
-                        discarded,
-                        failed,
-                    )
-                    logger.info("AT POSITION %d", f.tell())
-                    time.sleep(10)
-            except (ValidationError, KeyError) as e:
-                logger.error("Failed: %s", e)
-                failed += 1
-
-        logger.info(
-            "Done loading data. Totals: processed=%d, indexed=%d, discarded=%s, failed=%s",
-            i,
-            indexed,
-            discarded,
-            failed,
-        )
+    fire.Fire(upload)

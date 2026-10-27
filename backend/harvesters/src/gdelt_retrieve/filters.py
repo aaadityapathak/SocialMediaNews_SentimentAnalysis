@@ -90,13 +90,10 @@ def event_matches(
     ):
         return False
 
-    if actor_cameo and not (
+    return not actor_cameo or (
         record.Actor1CountryCode == actor_cameo
         or record.Actor2CountryCode == actor_cameo
-    ):
-        return False
-
-    return True
+    )
 
 
 def gkg_is_australia(record: GkgRecord) -> bool:
@@ -161,14 +158,10 @@ def gkg_matches(
     bool
         True if any location block satisfies the constraints; False otherwise.
     """
-    blocks = record.location_blocks()
-
-    if country_fips:
-        if not any(len(b) > 2 and b[2] == country_fips for b in blocks):
-            return False
-
-    if adm1_code:
-        if not any(len(b) > 3 and b[3] == adm1_code for b in blocks):
-            return False
-
-    return True
+    if not country_fips and not adm1_code:
+        return True
+    return any(
+        (not country_fips or (len(block) > 2 and block[2] == country_fips))
+        and (not adm1_code or (len(block) > 3 and block[3] == adm1_code))
+        for block in record.location_blocks()
+    )

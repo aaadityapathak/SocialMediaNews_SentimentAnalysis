@@ -24,6 +24,10 @@ class MastodonSettings(BaseSettings):
         default="unimelb-c90024-t23",
     )
 
+    timeout_seconds: float = Field(default=30.0, gt=0)
+    max_retries: int = Field(default=3, ge=0)
+    retry_backoff_seconds: float = Field(default=1.0, gt=0)
+
     output_path: Path = Field(
         default=Path(__file__).parents[1] / "mastodon.secret",
         description="Path to store the Mastodon credential",

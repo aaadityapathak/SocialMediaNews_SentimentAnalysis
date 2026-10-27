@@ -35,6 +35,8 @@ class BlueskySettings(BaseSettings):
         gt=0,
         description="Maximum posts to stream before stopping",
     )
+    max_retries: int = Field(default=3, ge=0)
+    retry_backoff_seconds: float = Field(default=1.0, gt=0)
     output_path: Path = Field(
         default=Path(__file__).parents[2] / "bluesky-data.jsonl",
         description="Path to save streamed Bluesky records",

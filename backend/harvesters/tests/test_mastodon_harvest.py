@@ -6,6 +6,8 @@ from mastodon_retrieve import schemas
 from mastodon_retrieve.streamer import MastodonStreamer
 from mastodon_retrieve import MastodonHarvester, MastodonSearchParams
 
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture()
 def mastodon_dates() -> tuple[datetime, datetime]:

@@ -1,7 +1,7 @@
 import fire
-from elasticsearch import AsyncElasticsearch
+from valkey.asyncio import Valkey
 
-from elastic import ESSettings
+from valkey_settings import ValkeySettings
 from base import setup_logging
 from .streamer import BlueskyStreamer
 
@@ -13,25 +13,21 @@ async def stream_records(
     keywords: str | None = None,
 ):
     """
-    Stream AU-relevant Bluesky posts to Elasticsearch.
+    Stream AU-relevant Bluesky posts to the processing queue.
 
     keywords is optional and is used as an additional topic filter only.
     """
     streamer = BlueskyStreamer()
 
-    es_settings = ESSettings()
+    vk_settings = ValkeySettings()
     keyword_list = None
     if keywords:
         keyword_list = list(filter(None, map(str.strip, keywords.split(";"))))
 
-    async with AsyncElasticsearch(
-        es_settings.host,
-        api_key=es_settings.api_key,
-        verify_certs=False,
-    ) as es:
+    async with Valkey(host=vk_settings.host, port=vk_settings.port) as vk:
         total = await streamer.stream_to_vk(
-            es,
-            queue="bluesky-idx",
+            vk,
+            queue="social-posts-index",
             max_time=max_runtime,
             keywords=keyword_list,
         )
